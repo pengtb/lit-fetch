@@ -321,7 +321,8 @@ def _launch(pw, kwargs: dict):
     if (holder := _profile_holder()):
         raise ProfileBusy(
             f"这份 profile（{PROFILE_DIR.name}）正被另一个 Edge 占着（{holder}）—— "
-            f"先关掉那个 Edge 窗口再跑；直接开会被 Chromium 拒掉，绕开它又会丢掉里面的 cf_clearance")
+            f"先关掉那个 Edge 窗口再跑；如果它是上一轮留下的人类验证页，先在窗口里点过验证再关。"
+            f"直接开会被 Chromium 拒掉，绕开它又会丢掉里面的 cf_clearance")
     try:
         return _launch_at(pw, kwargs, PROFILE_DIR)
     except Exception as e:

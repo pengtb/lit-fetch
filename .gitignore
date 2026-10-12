@@ -1,0 +1,19 @@
+# 跑出来的东西：PDF 本体、日志、envelope —— 都是一次性验证产物，不进仓库
+out/
+
+# Python
+__pycache__/
+*.pyc
+
+# 虚拟环境（uv venv --python 3.11 .venv）
+.venv/
+
+# 浏览器 profile（默认在家目录，放这儿也一并忽略；含 cf_clearance，绝不能进仓库）
+.litfetch_profile/
+*.broken/
+*.fresh/
+
+# 编辑器
+.vscode/
+.idea/
+*.swp

@@ -1,6 +1,7 @@
 """离线自检：纯逻辑分支的断言（不联网、不需要浏览器）。`python lit_fetch.py --selfcheck`"""
 import os
 import sys
+from pathlib import Path
 
 import browser
 import lit_fetch as lf
@@ -124,6 +125,28 @@ def run() -> int:
     assert late == P[1:], late
     now, late = lf._defer_low_versions(P, False)
     assert now == P and late == [], (now, late)
+
+    # .env 解析：引号里的 # 不是注释、引号 + 行内注释要一起处理、export 前缀要认、已有环境变量优先
+    import tempfile
+    envfile = Path(tempfile.mkdtemp()) / ".env"
+    envfile.write_text('LITFETCH_EMAIL="a#b@x.edu"  # 行内注释\n'
+                       "LITFETCH_PROFILE='C:\\Users\\x\\.p'   # 单引号也一样\n"
+                       "# 整行注释\n"
+                       'export LITFETCH_FIXTURES=out\\fixtures.json  # 没引号就按 # 切\n'
+                       'export JUNK\n'
+                       'NOT_A_PAIR\n', encoding="utf-8")
+    for k in ("LITFETCH_EMAIL", "LITFETCH_FIXTURES", "LITFETCH_PROFILE"):
+        os.environ.pop(k, None)
+    lf.load_dotenv(envfile)
+    assert os.environ["LITFETCH_EMAIL"] == "a#b@x.edu", os.environ["LITFETCH_EMAIL"]
+    assert os.environ["LITFETCH_PROFILE"] == "C:\\Users\\x\\.p", os.environ["LITFETCH_PROFILE"]
+    assert os.environ["LITFETCH_FIXTURES"] == "out\\fixtures.json", os.environ["LITFETCH_FIXTURES"]
+    assert "JUNK" not in os.environ and "NOT_A_PAIR" not in os.environ
+    os.environ["LITFETCH_EMAIL"] = "keep@me"
+    lf.load_dotenv(envfile)
+    assert os.environ["LITFETCH_EMAIL"] == "keep@me"      # 已有的环境变量优先，不被 .env 覆盖
+    for k in ("LITFETCH_EMAIL", "LITFETCH_FIXTURES", "LITFETCH_PROFILE"):
+        os.environ.pop(k, None)
 
     # profile 占用检测：只有真在命令行里查到 --user-data-dir=<profile> 才算「被占用」，不会误报
     if os.name == "nt":

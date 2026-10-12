@@ -22,6 +22,17 @@
 引擎：`--engine edge|chrome|chromium`（默认 edge）。代理：默认不挂，需要时那一次命令前
 `export https_proxy=... http_proxy=...`（requests 继承环境变量）。
 
+## 配置（.env）
+
+本机配置放项目根目录的 `.env`（`.gitignore` 里有它，不会进仓库；照 `.env.example` 抄一份即可）。
+**环境变量优先于 `.env`**，想临时覆盖就 export，不用改文件。值只认字面量（不展开 `%USERPROFILE%`/`$HOME`）。
+
+    LITFETCH_EMAIL=you@example.com          # Unpaywall/Crossref 要求带真邮箱，不填就跳过那条路线
+    LITFETCH_PROFILE=C:\Users\you\.litfetch_profile   # 浏览器 profile 目录（默认 ~/.litfetch_profile）
+    LITFETCH_FIXTURES=out\fixtures.json     # realcheck.py 的标题夹具（可选）
+
+`LITFETCH_PROFILE` 里存着各站点的 `cf_clearance`，换目录等于把已过的 Cloudflare 挑战丢掉 —— 见下面那节。
+
 ## 契约
 
 JSON envelope（`--json` 时 stdout 只有这一行，诊断全在 stderr）：

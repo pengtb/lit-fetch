@@ -13,6 +13,9 @@ __pycache__/
 *.broken/
 *.fresh/
 
+# 本机配置（邮箱 / profile 路径 / 夹具路径）—— 绝不进仓库
+.env
+
 # 编辑器
 .vscode/
 .idea/

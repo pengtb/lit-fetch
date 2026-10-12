@@ -32,6 +32,38 @@ import requests
 SCHEMA = 1
 TIMEOUT = 25
 RETRY_5XX_WAIT_S = 3
+
+
+def load_dotenv(path: Path | None = None) -> None:
+    """把项目根目录的 .env 读进 os.environ（已存在的环境变量优先，不覆盖）。
+
+    ponytail: 不引 python-dotenv —— 就这点语法，自己解析十来行够了。支持 `export K=V`、单双引号
+    包住的值、整行注释；**行内注释只在没加引号时切**（`K="a#b"` 里的 # 是值的一部分，别切错）。
+    """
+    p = path or Path(__file__).with_name(".env")
+    try:
+        lines = p.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return
+    for line in lines:
+        s = line.strip()
+        if not s or s.startswith("#"):
+            continue
+        if s.lower().startswith("export "):
+            s = s[7:].lstrip()
+        key, sep, val = s.partition("=")
+        key, val = key.strip(), val.strip()
+        if not sep or not key:
+            continue
+        if val[:1] in ("\"", "'"):           # 引号包住的值：只取引号里的，后面的行内注释丢掉
+            end = val.find(val[0], 1)
+            val = val[1:end] if end > 0 else val[1:]
+        elif " #" in val:                     # 没引号才按行内注释切（`a #b` 会切错，这种写法就别用）
+            val = val.split(" #", 1)[0].strip()
+        os.environ.setdefault(key, val)
+
+
+load_dotenv()
 CONTACT = os.environ.get("LITFETCH_EMAIL", "")
 
 _UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "

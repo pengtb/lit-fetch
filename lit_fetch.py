@@ -530,7 +530,11 @@ def fetch(raw_id: str, out: Path | None = None, title: str = "", email: str = ""
             cands = [(f"https://europepmc.org/articles/{recs[0]['pmcid']}?pdf=render",
                       "europepmc", 2)]
 
-    if ident["kind"] in ("doi", "preprint") and re.match(r"^10\.", ident["value"]):
+    # 期刊 DOI 才走那条 OA API 阶梯。预印本（biorxiv/medrxiv）不走：
+    # - bioRxiv：这一站只有「浏览器直接下载」成过（见 README），问 unpaywall/S2/Europe PMC 只会
+    #   换来同一堵 CF 墙或别的站点的副本，白花几秒、还在 CF 那儿多记几笔 → 它的直链直接进 layer2。
+    # - medRxiv：它自己那两条直链（early / v.full.pdf）在 layer1 就能 200，本来也不需要这阶梯。
+    if ident["kind"] == "doi" and re.match(r"^10\.", ident["value"]):
         doi = ident["value"]
         cands += [(u, r, 0) for u, r in publisher_pdf_candidates(doi)]   # 出版商直链：便宜，且是正文
         for name, fn in (("unpaywall", lambda: unpaywall_candidates(doi, email)),

@@ -77,6 +77,9 @@ RPC 冒烟：ping/fetch/未知方法/shutdown 四帧全对，stdout 纯协议帧
    就是同一个 bioRxiv early URL（没有替代源）。
    `lit_fetch.py` 那边只有 `biorxiv.org` 会被标成 browser_first（medRxiv 在 layer1 有能成的路，
    不抢它的机会）；只要 layer2 拿到 medRxiv 的 URL，走的也是下载这条。
+   另外：**预印本（biorxiv/medrxiv）的 DOI 根本不走 unpaywall/S2/Europe PMC 那条 OA 阶梯** ——
+   biorxiv 反正只有这条路成，问它们只会换来同一堵 CF 墙、还多撞几次；medrxiv 自己的两条直链在
+   layer1 就能 200，也用不着。所以预印本从候选到取字节就是「自己的直链 → 浏览器」，一步不多。
 
 1. **`route.fetch()`**（首选）：用 Playwright 的路由在渲染器拿到 PDF 前把响应体截下来，
    再 `fulfill(204)`。不改 Edge 偏好、不二次请求、不碰内置阅读器，页面也不会死。

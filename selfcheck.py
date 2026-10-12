@@ -116,6 +116,14 @@ def run() -> int:
     assert lf._l2_candidates([], L, False, False) == []
     assert lf._l2_candidates([], [], True, False) == []
 
+    # 出版商优先只对期刊 DOI 成立（预印本自己就是"出版商"，走 browser_first 最快）
+    P0 = [("https://publisher.example/x.pdf", "pub_pdf", 0)]
+    L0 = [("https://doi.org/10.1/x", "unpaywall", 0)]
+    assert lf._prefer_publisher({"kind": "doi"}, P0, L0, True) is True
+    assert lf._prefer_publisher({"kind": "preprint"}, P0, L0, True) is False
+    assert lf._prefer_publisher({"kind": "doi"}, P0, L0, False) is False
+    assert lf._prefer_publisher({"kind": "doi"}, [], [("https://a/b", "unpaywall", 2)], True) is False
+
     # 版本分层：出版商那版有 OA 候选（rank 0）时，预印本/仓库的直链和落地页都不抢在它前面
     P = [("https://publisher.example/x.pdf", "pub_pdf", 0),
          ("https://arxiv.org/pdf/2409.11654", "unpaywall", 2),

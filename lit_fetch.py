@@ -458,6 +458,21 @@ def _l2_candidates(blocked: list[dict], landings: list[tuple[str, str, int]],
     return [{"kind": "landing", "url": u} for u, _, _ in landings]
 
 
+def _prefer_publisher(ident: dict, pdfish: list[tuple[str, str, int]],
+                      landings: list[tuple[str, str, int]], allow_browser: bool) -> bool:
+    """要不要走「出版商那版优先」（把预印本/仓库的候选推后）。
+
+    只对**期刊 DOI** 成立：预印本（bioRxiv/medRxiv）自己就是"出版商"，没有版本优劣可言，它的直链
+    本来就该直接交给 layer2 的浏览器下载（BROWSER_FIRST_HOSTS 那套）；arXiv 更没有这套候选。
+    ponytail: 不这么分的话，biorxiv 的 DOI 会被 unpaywall 标成 host_type=publisher，于是"出版商优先"
+    被误触发，它的直链被当成低版本推后、先去试 www.biorxiv.org/lookup/doi 那种落地页 = 白白多撞一次 CF。
+    """
+    if not allow_browser or ident.get("kind") != "doi":
+        return False
+    return (any(rk == 0 for _, _, rk in landings)
+            or any(rk == 0 for _, _, rk in pdfish))
+
+
 def _defer_low_versions(cands: list[tuple[str, str, int]], prefer_pub: bool
                         ) -> tuple[list[tuple[str, str, int]], list[tuple[str, str, int]]]:
     """(先试的, 留到后面的)，保留 rank 好让调用方继续分层。
@@ -572,9 +587,8 @@ def fetch(raw_id: str, out: Path | None = None, title: str = "", email: str = ""
     # 出版商优先：unpaywall 说出版商自己就是 OA（有 rank 0 的候选）时，预印本/仓库那版先放着 ——
     # 不然 arXiv 的 submittedVersion 会先被拿到，出版商的 publishedVersion 就轮不到了。
     # 直链和落地页都要分层：arXiv 的 DOI 落地页（rank 2）上的 citation_pdf_url 就是 arXiv PDF，
-    # 只挡直链的话它照样会从落地页那条绕回来。
-    prefer_pub = allow_browser and (any(rk == 0 for _, _, rk in landings)
-                                    or any(rk == 0 for _, _, rk in pdfish))
+    # 只挡直链的话它照样会从落地页那条绕回来。预印本（biorxiv/medrxiv）不参与，见 _prefer_publisher。
+    prefer_pub = _prefer_publisher(ident, pdfish, landings, allow_browser)
     now_p, late_p = _defer_low_versions(pdfish, prefer_pub)
     # ponytail: doi.org 是解析器（302 到真正的落地页），可能慢（实测 10–27s），所以同层里排最后。
     ordered_l = sorted(landings, key=lambda t: (t[2], "doi.org/" in t[0]))
@@ -600,7 +614,15 @@ def fetch(raw_id: str, out: Path | None = None, title: str = "", email: str = ""
 
     def try_landing(url: str, route: str) -> bool:
         """落地页那一路：跟掉 doi.org 的 302 → 读 citation_pdf_url → 当直链抓。"""
+        # 预印本站的落地页必定是 CF 墙（BROWSER_FIRST_HOSTS 特例就是这么来的）。除了直接命中，
+        # 还要挡 doi.org 解析器那条：预印本的 doi.org 一定落到 biorxiv/medrxiv，白等它 10–27s 再撞 CF。
+        if _browser_first(url) or (ident["kind"] == "preprint" and "doi.org/" in url):
+            note(f"  ⇢ 跳过预印本站落地页（CF 墙，直链已交给 layer2）: {url[:80]}")
+            return False
         target = resolve_landing(url, email) if "doi.org/" in url else url
+        if _browser_first(target):
+            note(f"  ⇢ 落地页落到预印本站（CF 墙，直链已交给 layer2）: {target[:80]}")
+            return False
         note(f"  → 试落地页: {target[:100]}")
         for meta_url, _ in landing_meta_candidates(target, email):
             if try_grab(meta_url, "landing_meta"):

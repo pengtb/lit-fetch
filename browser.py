@@ -127,7 +127,7 @@ def _force_pdf_download(profile_dir: Path) -> None:
         p.write_text(json.dumps(data), encoding="utf-8")
 
 
-def _download_via_nav(page, url: str, quiet: bool) -> bytes | None:
+def _download_via_nav(page, url: str, quiet: bool) -> tuple[bytes | None, str | None]:
     """真导航，让浏览器把 PDF 当下载写盘；我们从盘上取字节（不碰阅读器、不发第二次请求）。
 
     ponytail: 下载通道整条交给 CDP 显式开（`Browser.setDownloadBehavior`，behavior=allow +
@@ -136,6 +136,8 @@ def _download_via_nav(page, url: str, quiet: bool) -> bytes | None:
     为什么不用 Playwright 的 `expect_download` + `save_as`：实测事件会正常触发，但拿到的文件是
     0 字节（事件在传输开始时就发，save_as 拿到的不是最终内容）。让它自己写盘、我们等文件长大，
     只有一个真相来源。
+
+    返回 (body, why)：why="cf_challenge" 表示卡在 Cloudflare 人类验证（调用方据此报 needs_human）。
     """
     t0 = time.time()
     for old in DOWNLOAD_DIR.glob("*.pdf*"):      # 先清干净：免得把上一轮的文件当成这一轮的
@@ -149,12 +151,27 @@ def _download_via_nav(page, url: str, quiet: bool) -> bytes | None:
         _log(f"  CDP 下载通道没开成（{type(e).__name__}: {str(e)[:60]}）", quiet)
     with contextlib.suppress(Exception):     # 下载一开始 goto 就会抛，属正常
         page.goto(url, wait_until="domcontentloaded", timeout=NAV_TIMEOUT_MS)
+    # ponytail: 这条路以前**完全不看挑战** —— bioRxiv 的 CF 一旦给验证页，这里就只是干等 420s 的下载
+    # 事件（用户看到的正是「卡很长时间也不通过」，而且没人告诉他要点一下）。所以导航后先判挑战，
+    # 把窗口弄到前面、等真人点；点过了再重新导航一次，让下载真正开始。
+    if _challenged(page):
+        _bring_to_front(page)
+        if not _settle(page, quiet, "下载前"):
+            return None, "cf_challenge"
+        with contextlib.suppress(Exception):
+            page.goto(url, wait_until="domcontentloaded", timeout=NAV_TIMEOUT_MS)
     body = _wait_fresh_download(t0, quiet)
     if body:
         _log(f"  浏览器下载 → {len(body)}B", quiet)
-        return body
+        return body, None
     _log("  下载目录里没等到 PDF", quiet)
-    return None
+    return None, "cf_challenge" if _challenged(page) else "download_failed"
+
+
+def _bring_to_front(page) -> None:
+    """把窗口提到前面来 —— 挑战要真人点时，光在 stderr 里喊一句是没人看得见的。"""
+    with contextlib.suppress(Exception):
+        page.bring_to_front()
 
 
 def _wait_fresh_download(since: float, quiet: bool, timeout: float = 420.0,
@@ -227,6 +244,7 @@ def _settle(page, quiet: bool, step: str) -> bool:
     while _challenged(page):
         if not told and time.time() - started > 8 and _challenge_kind(page) == "interactive":
             told = True
+            _bring_to_front(page)                 # 光打日志没人看得见，把窗口提到前面来
             _log(f"{step}：挑战需要真人操作 —— 在弹出的浏览器窗口里点一下，我继续等（"
                  f"不点就等它自己过）", quiet)
         if time.time() - started > CF_WAIT_S:
@@ -279,7 +297,8 @@ def _profile_holder() -> str | None:
         return None                       # 查不动就别拦着，让 launch 自己去撞
     for line in (r.stdout or "").splitlines():
         if f"--user-data-dir={PROFILE_DIR}" in line:
-            return line.strip()[:60]
+            pid = line.split(maxsplit=1)[0]
+            return f"pid={pid} --user-data-dir={PROFILE_DIR}"
     return None
 
 
@@ -455,7 +474,7 @@ def fetch_with_browser(blocked: list[dict], out: Path | None, title: str = "",
                         # 请求都 403（裸 HTTP、代理、route.fetch、带导航头重取），导航本身也只是
                         # 阅读器占位文档；唯一成过的一条（36,880,144B）就是让浏览器把 PDF 当下载交
                         # 出来 —— 下载不产生第二次请求。所以别的路一概不试。
-                        body = _download_via_nav(page, url, quiet)
+                        body, why = _download_via_nav(page, url, quiet)
                         if body:
                             result = _finish(body, url, out, title, lf)
                             if result.get("ok"):
@@ -463,8 +482,10 @@ def fetch_with_browser(blocked: list[dict], out: Path | None, title: str = "",
                             if result.get("verdict") == "title_absent":
                                 rejected = result
                         else:
-                            result = {"ok": False, "url": url, "blocked_kind": "download_failed",
-                                      "needs_human": False}
+                            # 卡在人类验证就如实报：窗口留着（needs_human），插件里显示「需要真人点」
+                            result = {"ok": False, "url": url,
+                                      "blocked_kind": why or "download_failed",
+                                      "needs_human": why == "cf_challenge"}
                         continue
                     if not lf._looks_like_pdf(url):
                         # 落地页候选（layer1 空手时喂进来的）：①② 都会白等（① 甚至把导航吞成
@@ -500,13 +521,17 @@ def fetch_with_browser(blocked: list[dict], out: Path | None, title: str = "",
                                       "needs_human": False}
                         # ② 让浏览器把 PDF 当下载交出来（profile 已设 always_open_pdf_externally）
                         if time.time() - t_cand < CAND_BUDGET_S:
-                            body = _download_via_nav(page, url, quiet)
+                            body, why = _download_via_nav(page, url, quiet)
                             if body:
                                 result = _finish(body, url, out, title, lf)
                                 if result.get("ok"):
                                     break
                                 if result.get("verdict") == "title_absent":
                                     rejected = result
+                                continue
+                            if why == "cf_challenge":
+                                result = {"ok": False, "url": url, "blocked_kind": why,
+                                          "needs_human": True}
                                 continue
                         else:
                             _log(f"  候选预算 {CAND_BUDGET_S}s 用完 → 换下一个", quiet)
@@ -524,13 +549,17 @@ def fetch_with_browser(blocked: list[dict], out: Path | None, title: str = "",
                             result = {"ok": False, "blocked_kind": "cf_challenge", "url": url,
                                       "needs_human": True}
                             continue
-                        body = _download_via_nav(page, url, quiet)      # 挑战过了再试下载
+                        body, why = _download_via_nav(page, url, quiet)  # 挑战过了再试下载
                         if body:
                             result = _finish(body, url, out, title, lf)
                             if result.get("ok"):
                                 break
                             if result.get("verdict") == "title_absent":
                                 rejected = result
+                            continue
+                        if why == "cf_challenge":
+                            result = {"ok": False, "url": url, "blocked_kind": why,
+                                      "needs_human": True}
                             continue
                         try:
                             resp = page.goto(url, wait_until="domcontentloaded",

@@ -151,16 +151,23 @@ def _download_via_nav(page, url: str, quiet: bool) -> tuple[bytes | None, str | 
         _log(f"  CDP 下载通道没开成（{type(e).__name__}: {str(e)[:60]}）", quiet)
     with contextlib.suppress(Exception):     # 下载一开始 goto 就会抛，属正常
         page.goto(url, wait_until="domcontentloaded", timeout=NAV_TIMEOUT_MS)
-    # ponytail: 这条路以前**完全不看挑战** —— bioRxiv 的 CF 一旦给验证页，这里就只是干等 420s 的下载
-    # 事件（用户看到的正是「卡很长时间也不通过」，而且没人告诉他要点一下）。所以导航后先判挑战，
-    # 把窗口弄到前面、等真人点；点过了再重新导航一次，让下载真正开始。
-    if _challenged(page):
-        _bring_to_front(page)
-        if not _settle(page, quiet, "下载前"):
-            return None, "cf_challenge"
-        with contextlib.suppress(Exception):
-            page.goto(url, wait_until="domcontentloaded", timeout=NAV_TIMEOUT_MS)
-    body = _wait_fresh_download(t0, quiet)
+    # ponytail: **先看磁盘、再判挑战**。下载成功时页面正在下载/空白，page.content() 取不到 →
+    # _challenged() 的兜底（取不到就当"还没稳"）会把它误判成"还在挑战"，于是进 _settle 白等 60s，
+    # 那份已经落盘的 PDF 反而没人读（读盘那句原先在挑战分支后面）。
+    # 实测 10.64898/2026.08.04.742916：文件 03:46:40 就写完了，日志却继续报"需要真人点"，插件报没抓到。
+    body = _wait_fresh_download(t0, quiet, timeout=10, stall_s=3)
+    if not body:
+        if _challenged(page):
+            _bring_to_front(page)
+            if _settle(page, quiet, "下载前"):
+                with contextlib.suppress(Exception):
+                    page.goto(url, wait_until="domcontentloaded", timeout=NAV_TIMEOUT_MS)
+                body = _wait_fresh_download(t0, quiet)          # 挑战过了：正经等下载（慢站点要好几分钟）
+            else:
+                # 挑战没过也再扫一眼 —— 用户可能已经点过了、文件其实下来了，别把它丢了
+                body = _wait_fresh_download(t0, quiet, timeout=10, stall_s=3)
+        else:
+            body = _wait_fresh_download(t0, quiet)              # 没挑战：正经等下载
     if body:
         _log(f"  浏览器下载 → {len(body)}B", quiet)
         return body, None
@@ -197,7 +204,11 @@ def _wait_fresh_download(since: float, quiet: bool, timeout: float = 420.0,
             newest = max(done, key=lambda q: q.stat().st_mtime)
             size = newest.stat().st_size
             if last_size == size and size > 0:
-                body = newest.read_bytes()
+                try:
+                    body = newest.read_bytes()
+                except Exception as e:
+                    _log(f"  文件读不到（{type(e).__name__}，可能还被 Edge 占着）→ 下一轮再看", quiet)
+                    body = b""
                 if body[:4] == b"%PDF":
                     return body
             last_size = size

@@ -1,6 +1,7 @@
 """离线自检：纯逻辑分支的断言（不联网、不需要浏览器）。`python lit_fetch.py --selfcheck`"""
 import os
 import sys
+import time
 from pathlib import Path
 
 import browser
@@ -160,6 +161,53 @@ def run() -> int:
     if os.name == "nt":
         h = browser._profile_holder()
         assert h is None or "--user-data-dir=" in h, h
+
+    # 下载已经落盘、但页面读不出内容时（page.content() 抛 → _challenged 的兜底会判"还在挑战"），
+    # _download_via_nav 必须先看磁盘把它认下来 —— 实测 10.64898/2026.08.04.742916 就是在这儿丢的：
+    # 文件 03:46:40 写完，代码却按 cf_challenge 收尾、没人读它。
+    class _FakeCDP:
+        def send(self, *a, **k):
+            pass
+
+    class _FakeCtx:
+        def new_cdp_session(self, page):
+            return _FakeCDP()
+
+    browser.DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
+    fakedl = browser.DOWNLOAD_DIR / "selfcheck-dl2.pdf"
+
+    class _FakePage:
+        """模拟真实时序：导航那一刻下载落盘，而页面正在下载 → content() 取不到。"""
+
+        def __init__(self):
+            self.context = _FakeCtx()
+            self.url = "https://www.biorxiv.org/content/x/y.full.pdf"
+
+        def goto(self, *a, **k):
+            fakedl.write_bytes(b"%PDF-1.4\n" + b"x" * 4096)
+            raise RuntimeError("下载一开始 goto 必然抛")
+
+        def content(self):
+            raise RuntimeError("页面正在下载 → 取不到内容")
+
+        def title(self):
+            return "请稍候…"
+
+        def wait_for_timeout(self, ms):
+            time.sleep(ms / 1000)
+
+        def bring_to_front(self):
+            pass
+
+    old_wait = browser.CF_WAIT_S
+    browser.CF_WAIT_S = 0          # 万一回归到"先等挑战"，也别让自检干等 60s
+    try:
+        got, why = browser._download_via_nav(_FakePage(), "https://www.biorxiv.org/x.full.pdf",
+                                             quiet=True)
+        assert got and got[:4] == b"%PDF" and why is None, (got and len(got), why)
+    finally:
+        browser.CF_WAIT_S = old_wait
+        fakedl.unlink(missing_ok=True)
 
     # CDP 下载的取件逻辑：大小稳定的 PDF 才算；旧文件/未来时间点/非 PDF 都不认
     import time as _t

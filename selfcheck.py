@@ -214,6 +214,28 @@ def run() -> int:
         browser.DOWNLOAD_DIR = old_dl
         shutil.rmtree(fakedl.parent, ignore_errors=True)
 
+    # _route_grab 的 route/unroute 必须用「同一个谓词 + 同一个 handler」对象：实测用新 lambda 时
+    # Playwright 匹配不上，路由会一直留着，之后同一个 URL 的所有导航都被吞掉（空白页 + 静默 420s）。
+    class _RoutePage:
+        def __init__(self):
+            self.registered, self.unrouted = [], []
+
+        def route(self, pred, handler):
+            self.registered.append((pred, handler))
+
+        def unroute(self, pred=None, handler=None):
+            self.unrouted.append((pred, handler))
+
+        def goto(self, *a, **k):
+            raise RuntimeError("fulfill 掉之后 goto 必然抛")
+
+    rp = _RoutePage()
+    body, _why = browser._route_grab(rp, "https://x/y.pdf", quiet=True)
+    assert body is None, body
+    assert rp.registered and rp.unrouted, (rp.registered, rp.unrouted)
+    assert rp.registered[0][0] is rp.unrouted[0][0], "unroute 的谓词必须是同一个对象"
+    assert rp.registered[0][1] is rp.unrouted[0][1], "unroute 的 handler 必须是同一个对象"
+
     # CDP 下载的取件逻辑：大小稳定的 PDF 才算；旧文件/未来时间点/非 PDF 都不认
     import time as _t
     browser.DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)

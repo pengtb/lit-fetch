@@ -356,6 +356,14 @@ def _route_grab(page, url: str, quiet: bool) -> tuple[bytes | None, str | None]:
     ponytail: 这是三条路里最干净的一条 —— 不改 Edge 的 PDF 偏好、不二次请求、不碰内置阅读器，
     页面也不会因为「把 PDF 交给下载流程」而整个挂掉（实测 dummy.pdf 13KB %PDF-，页面存活）。
     返回 (body, why)；why 形如 "http_403"，让调用方知道「这个候选是被直接拒绝的，别再折腾」。
+
+    两处是 10.1093/bioinformatics/btag482 那次实测逼出来的：
+    1. `page.unroute(lambda u: u == url)` 每次都是**新的 lambda**，而 Playwright 按对象匹配，
+       于是这条路由从来没被移除过 —— 之后对同一个 URL 的每次导航（② 的下载、③ 的重导航）都被它
+       吞掉：CF 的挑战页从没机会渲染、挑战永远不会自解，最后静默等满 420s 报 exit 7。
+       谓词和 handler 必须留成变量、用**同一对象** unroute。
+    2. 不是 PDF 时以前 `fulfill(204)` 把导航吞成空白页（用户看到的就是白屏）。改成把**真实响应**
+       还回去 —— 挑战页/落地页能真正渲染，挑战才有机会自己过；拿到 PDF 时才用 204 收尾。
     """
     box: dict = {"err": None}
 
@@ -365,22 +373,24 @@ def _route_grab(page, url: str, quiet: bool) -> tuple[bytes | None, str | None]:
             body = resp.body()
             if body[:4] == b"%PDF" and len(body) > 2048:
                 box["body"] = body
+                route.fulfill(status=204, body=b"")          # 正文已在手上，别让渲染器再解一次
             else:
                 box["err"] = f"http_{resp.status}" if resp.status >= 400 else f"not_pdf_{resp.status}"
-            route.fulfill(status=204, body=b"")
+                route.fulfill(response=resp)                 # 不是 PDF：真实响应交还页面
         except Exception as e:
             box["err"] = f"{type(e).__name__}: {str(e)[:60]}"
             with contextlib.suppress(Exception):
                 route.abort()
 
-    page.route(lambda u: u == url, handler)
+    pred = lambda u: u == url                    # noqa: E731 —— 必须和下面 unroute 用同一个对象
+    page.route(pred, handler)
     try:
         page.goto(url, wait_until="commit", timeout=NAV_TIMEOUT_MS)
     except Exception:
         pass                       # 路由里 fulfill 掉之后 goto 必然抛，属正常
     finally:
         with contextlib.suppress(Exception):
-            page.unroute(lambda u: u == url)
+            page.unroute(pred, handler)
     if box.get("body"):
         _log(f"  route.fetch → {len(box['body'])}B", quiet)
         return box["body"], None

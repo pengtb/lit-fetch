@@ -81,9 +81,17 @@ RPC 冒烟：ping/fetch/未知方法/shutdown 四帧全对，stdout 纯协议帧
    biorxiv 反正只有这条路成，问它们只会换来同一堵 CF 墙、还多撞几次；medrxiv 自己的两条直链在
    layer1 就能 200，也用不着。所以预印本从候选到取字节就是「自己的直链 → 浏览器」，一步不多。
 
-1. **`route.fetch()`**（首选）：用 Playwright 的路由在渲染器拿到 PDF 前把响应体截下来，
-   再 `fulfill(204)`。不改 Edge 偏好、不二次请求、不碰内置阅读器，页面也不会死。
+1. **`route.fetch()`**（首选）：用 Playwright 的路由在渲染器拿到 PDF 前把响应体截下来；拿到 `%PDF`
+   就 `fulfill(204)` 收尾。不改 Edge 偏好、不二次请求、不碰内置阅读器，页面也不会死。
    实测：控制用的 dummy.pdf → 13,264B `%PDF-`，页面存活（`selfcheck_layer2.py` 就是这一条的验收）。
+   两个坑（`10.1093/bioinformatics/btag482` 那次实测逼出来的）：
+   * **不是 PDF 时要把真实响应还回页面**（`route.fulfill(response=resp)`），不能一律 204 ——
+     204 把导航吞成空白页，CF 的挑战页永远没机会渲染、挑战也就不会自解，用户看到的就是白屏 +
+     静默等满 420s 后失败。改成还真实响应后，挑战页正常渲染并在 60s 内自己过，下载随之落地
+     （该 DOI 4,934,279B / 12 页，标题命中 100%）。
+   * 收尾的 `page.unroute(pred, handler)` 必须传**同一个谓词对象和同一个 handler**：随手写个新
+     `lambda` Playwright 匹配不上，这条路由会一直留着，之后同一个 URL 的每次导航（② 和 ③）都被它
+     吞掉。selfcheck 里有这条恒等断言（把修复藏起来它就红）。
 2. **浏览器直接下载**：profile 里写 `plugins.always_open_pdf_externally=true`，让 Edge 把 PDF 当下载交出来。
    这条正是 bioRxiv 那次成功拿到的 **36,880,144B**（29 页，标题 "The mGluR5 Agonist, CHPG, …"）——
    代价是它有时会让整个 Edge 上下文直接退出（控制 PDF 也能复现），所以现在只当备用。

@@ -1,6 +1,8 @@
 """离线自检：纯逻辑分支的断言（不联网、不需要浏览器）。`python lit_fetch.py --selfcheck`"""
 import os
+import shutil
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -174,6 +176,8 @@ def run() -> int:
             return _FakeCDP()
 
     browser.DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
+    old_dl = browser.DOWNLOAD_DIR
+    browser.DOWNLOAD_DIR = Path(tempfile.mkdtemp())     # 别动真实下载目录（_download_via_nav 会清空它）
     fakedl = browser.DOWNLOAD_DIR / "selfcheck-dl2.pdf"
 
     class _FakePage:
@@ -207,7 +211,8 @@ def run() -> int:
         assert got and got[:4] == b"%PDF" and why is None, (got and len(got), why)
     finally:
         browser.CF_WAIT_S = old_wait
-        fakedl.unlink(missing_ok=True)
+        browser.DOWNLOAD_DIR = old_dl
+        shutil.rmtree(fakedl.parent, ignore_errors=True)
 
     # CDP 下载的取件逻辑：大小稳定的 PDF 才算；旧文件/未来时间点/非 PDF 都不认
     import time as _t

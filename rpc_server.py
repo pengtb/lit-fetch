@@ -89,6 +89,7 @@ def _handle(req: dict) -> dict | None:
                    title=params.get("title", ""), email=params.get("email", lf.CONTACT),
                    engine=params.get("engine", "edge"),
                    allow_browser=params.get("allow_browser", True), quiet=True,
+                   paywall=bool(params.get("paywall", lf.TRY_PAYWALL_DEFAULT)),
                    on_progress=hook)
     env["exit_code"] = lf.exit_code(env)
     _note("done", identifier=ident, ok=env["ok"], route=env.get("route"), exit_code=env["exit_code"])

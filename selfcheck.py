@@ -143,6 +143,20 @@ def run() -> int:
     assert lf._l2_candidates([], [("https://pmc.ncbi.nlm.nih.gov/articles/PMC1/", "unpaywall", 2)],
                              False, False) == []
 
+    # 付费刊那条的开窗门槛：paywall=False（插件设置 / --no-paywall / LITFETCH_PAYWALL=0）时整条关掉
+    assert lf._l2_candidates([], L, False, False, paywall=False) == []
+    assert lf._l2_candidates([], L, False, False, paywall=True) == [{"kind": "landing", "url": L[0][0]}]
+    assert lf._l2_candidates(B, L, False, False, paywall=False) == B      # 被墙的候选不受这个开关影响
+    # `LITFETCH_PAYWALL` 的取值解析（默认试）
+    assert lf._env_flag("SELF_CHECK_NOT_SET_XYZ", True) is True
+    for v in ("0", "false", "NO", " off "):
+        os.environ["SELF_CHECK_FLAG"] = v
+        assert lf._env_flag("SELF_CHECK_FLAG", True) is False, v
+    for v in ("1", "true", "yes", ""):
+        os.environ["SELF_CHECK_FLAG"] = v
+        assert lf._env_flag("SELF_CHECK_FLAG", True) is True, v
+    del os.environ["SELF_CHECK_FLAG"]
+
     # 出版商优先只对期刊 DOI 成立（预印本自己就是"出版商"，走 browser_first 最快）
     P0 = [("https://publisher.example/x.pdf", "pub_pdf", 0)]
     L0 = [("https://doi.org/10.1/x", "unpaywall", 0)]
@@ -275,7 +289,7 @@ def run() -> int:
 
     print("selfcheck OK：标识符 11 例 / 坏输入 3 例 / MDPI 2 例 / EPMC 3 例 / 退出码 4 例 / "
           "标题归一 2 例 / 直链判定 10 例 / bioRxiv 特例 4 例 / 下载取件 3 例 / "
-          "出版商直链 5 例 / location 排序 6 例 / layer2 门槛 8 例 / Cell Press PII 6 例 / 版本分层 3 例")
+          "出版商直链 5 例 / location 排序 6 例 / layer2 门槛 8 例 / Cell Press PII 6 例 / paywall 开关 11 例 / 版本分层 3 例")
     return 0
 
 

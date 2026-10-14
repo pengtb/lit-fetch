@@ -66,8 +66,19 @@ def load_dotenv(path: Path | None = None) -> None:
 load_dotenv()
 CONTACT = os.environ.get("LITFETCH_EMAIL", "")
 
+
+def _env_flag(name: str, default: bool = True) -> bool:
+    """`LITFETCH_XXX=0/false/no/off` → False；空或没设 → default。"""
+    v = os.environ.get(name)
+    return default if not v else v.strip().lower() not in ("0", "false", "no", "off")
+
 _UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
        "(KHTML, like Gecko) Chrome/153.0.0.0 Safari/537.36")
+
+# 付费刊（Unpaywall 说 closed）要不要试一次出版商的正文页。默认试（机构 IP 在的时候那是唯一的路）；
+# `--no-paywall` 或 `LITFETCH_PAYWALL=0` 关掉 —— 关了就是老行为：closed 直接报「付费墙」。
+# RPC 那边插件用 `paywall` 参数覆盖。
+TRY_PAYWALL_DEFAULT = _env_flag("LITFETCH_PAYWALL", True)
 
 
 def hdrs(email: str = "") -> dict:
@@ -475,23 +486,25 @@ def title_verdict(pdf: bytes, title: str) -> tuple[str, str]:
 
 # ── 主流程 ───────────────────────────────────────────────────────────────────
 def _l2_candidates(blocked: list[dict], landings: list[tuple[str, str, int]],
-                   is_oa: bool | None, free_at_publisher: bool) -> list[dict]:
+                   is_oa: bool | None, free_at_publisher: bool,
+                   paywall: bool = True) -> list[dict]:
     """layer2 该拿哪些 URL 去开浏览器。
 
     ① 有被墙的候选 → 原样给（老行为）。② 一个候选都没试出来、落地页链还在 → 用落地页顶上：
     Elsevier 那种 doi.org → linkinghub 跳转壳 → CF 墙，跳转和墙都只有浏览器跟得动，而落地页上
     的 citation_pdf_url 正是 browser.py 里现成的分支（只是以前没被喂过）。
-    ③ Unpaywall 明说不是 OA 且 PubMed 也没标 free → **本来是「不开窗，白开」**；2026-10 改成：
-       落地页里有**出版商页**（rank 0，或 doi.org 那条 doi_resolver）就照开一次。实测
-       10.1016/j.cell.2026.09.017（closed）：校网 VPN 的机构 IP 下，cell.com 文章页的 CF 挑战 5s
-       自己过掉、页面里 citation_pdf_url → `/cell/pdf/<PII>.pdf` 直接下成；没机构订阅时它也只是
-       几十秒内以「付费墙」收尾，代价可接受。仓库/预印本的落地页对 closed 没意义，仍然不开。
+    ③ Unpaywall 明说不是 OA 且 PubMed 也没标 free → 本来是「不开窗，白开」；2026-10 改成：
+       落地页里有**出版商页**（rank 0，或 doi.org 那条 doi_resolver）就照开一次（`paywall=True`
+       时）。实测 10.1016/j.cell.2026.09.017（closed）：校网 VPN 的机构 IP 下 cell.com 那条
+       11,110,651B 下成；没机构订阅时它也只是几十秒内以「付费墙」收尾，代价可接受。
+       仓库/预印本的落地页对 closed 没意义，仍然不开。`paywall=False`（插件设置/`--no-paywall`）
+       时整条关掉，回到「不开窗」的老行为。
     """
     if blocked:
         return blocked
     pub = [(u, r) for u, r, rk in landings if rk == 0 or r == "doi_resolver"]
     if is_oa is False and not free_at_publisher:
-        return [{"kind": "landing", "url": u} for u, _ in pub]
+        return [{"kind": "landing", "url": u} for u, _ in pub] if paywall else []
     return [{"kind": "landing", "url": u} for u, _, _ in landings]
 
 
@@ -525,6 +538,7 @@ def _defer_low_versions(cands: list[tuple[str, str, int]], prefer_pub: bool
 
 def fetch(raw_id: str, out: Path | None = None, title: str = "", email: str = "",
           engine: str = "edge", allow_browser: bool = True, quiet: bool = False,
+          paywall: bool = TRY_PAYWALL_DEFAULT,
           on_progress: Callable[[str], None] | None = None) -> dict:
     started = time.time()
     tried: list[str] = []
@@ -574,7 +588,8 @@ def fetch(raw_id: str, out: Path | None = None, title: str = "", email: str = ""
     if ident["kind"] == "doi" and re.match(r"^10\.", ident["value"]):
         doi = ident["value"]
         cands += [(u, r, 0) for u, r in publisher_pdf_candidates(doi)]   # 出版商直链：便宜，且是正文
-        cands += [(u, r, 0) for u, r in cell_press_pdf_candidates(doi, email)]   # Cell Press 那条
+        if paywall:      # Cell Press 那条是「试付费刊」的一部分（多一次 Crossref 请求），关掉就不问
+            cands += [(u, r, 0) for u, r in cell_press_pdf_candidates(doi, email)]
         for name, fn in (("unpaywall", lambda: unpaywall_candidates(doi, email)),
                          ("s2", lambda: s2_candidates(doi, email)),
                          ("europepmc", lambda: pmcid_candidates(doi, email))):
@@ -688,7 +703,7 @@ def fetch(raw_id: str, out: Path | None = None, title: str = "", email: str = ""
     # layer2：门槛见 _l2_candidates（被墙的优先，空手时用落地页顶）。放在校验/写盘之前 ——
     # 「退到低版本」那句得排在它后面，而正文写盘只该有一处。
     l2: dict | None = None
-    l2_cands = _l2_candidates(blocked, now_l, is_oa, free_at_publisher)
+    l2_cands = _l2_candidates(blocked, now_l, is_oa, free_at_publisher, paywall)
     if not body and allow_browser and l2_cands:
         try:
             import browser
@@ -728,7 +743,7 @@ def fetch(raw_id: str, out: Path | None = None, title: str = "", email: str = ""
            "bytes": len(body) if body else 0,
            "sha256": hashlib.sha256(body).hexdigest() if body else None,
            "path": None, "free_at_publisher": free_at_publisher,
-           "is_oa": is_oa, "oa_status": oa_status,
+           "is_oa": is_oa, "oa_status": oa_status, "paywall": paywall,
            "elapsed_s": round(time.time() - started, 1)}
 
     if body and out:
@@ -750,11 +765,16 @@ def fetch(raw_id: str, out: Path | None = None, title: str = "", email: str = ""
                 env["needs_human"] = bool(l2.get("needs_human"))
 
     # 付费墙：Unpaywall 明说不是 OA、PubMed 也没标 free、最后两手都没拿到 → 这不是「被墙」，
-    # 是没有可下载副本。2026-10 起付费样本也会走一次出版商页（机构 IP 下能成），所以提示分两种说法，
-    # 别把「没试过」说成「试过」。
+    # 是没有可下载副本。付费样本会走一次出版商页（机构 IP 下能成），所以提示分三种说法，
+    # 别把「没试过」说成「试过」、也别把「关掉了」说成「试过」。
     env["paywalled"] = bool(is_oa is False and not free_at_publisher and not env.get("ok"))
     if env["paywalled"]:
-        how = "出版商页也试过（浏览器），没拿到" if l2 is not None else "没开浏览器"
+        if not paywall:
+            how = "付费刊这条路是关的（paywall=false）"
+        elif l2 is not None:
+            how = "出版商页也试过（浏览器），没拿到"
+        else:
+            how = "没开浏览器"
         note(f"  · 付费墙（Unpaywall oa_status={oa_status or 'closed'}）：没有 OA 副本，{how} —— "
              f"有机构订阅（校网/VPN）时才拿得到，不是被墙")
 
@@ -786,11 +806,14 @@ def main(argv: list[str]) -> int:
     ap.add_argument("--email", default=CONTACT)
     ap.add_argument("--engine", default="edge", choices=["edge", "chrome", "chromium"])
     ap.add_argument("--no-browser", action="store_true")
+    ap.add_argument("--no-paywall", action="store_true",
+                    help="不去试付费刊的出版商正文页（默认试一次；也可用 LITFETCH_PAYWALL=0）")
     ap.add_argument("--json", action="store_true")
     a = ap.parse_args(argv)
 
     env = fetch(a.identifier, Path(a.out) if a.out else None, title=a.title, email=a.email,
-                engine=a.engine, allow_browser=not a.no_browser, quiet=a.json)
+                engine=a.engine, allow_browser=not a.no_browser, quiet=a.json,
+                paywall=False if a.no_paywall else TRY_PAYWALL_DEFAULT)
     if a.json:
         print(json.dumps(env, ensure_ascii=False))
     return exit_code(env)

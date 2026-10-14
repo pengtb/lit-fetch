@@ -31,8 +31,11 @@
     LITFETCH_EMAIL=you@example.com          # Unpaywall/Crossref 要求带真邮箱，不填就跳过那条路线
     LITFETCH_PROFILE=C:\Users\you\.litfetch_profile   # 浏览器 profile 目录（默认 ~/.litfetch_profile）
     LITFETCH_FIXTURES=out\fixtures.json     # realcheck.py 的标题夹具（可选）
+    LITFETCH_PAYWALL=0                      # 关掉「付费刊也试一次出版商正文页」（默认 1=试）
 
 `LITFETCH_PROFILE` 里存着各站点的 `cf_clearance`，换目录等于把已过的 Cloudflare 挑战丢掉 —— 见下面那节。
+`LITFETCH_PAYWALL` 只管付费刊那一次尝试，与开放获取的路线无关；命令行对应 `--no-paywall`，
+RPC 对应 `fetch` 的 `paywall` 参数（插件用它做设置开关）。
 
 ## 契约
 
@@ -40,7 +43,7 @@ JSON envelope（`--json` 时 stdout 只有这一行，诊断全在 stderr）：
 
     schema · input · kind · value · ok · route · url · tried[] · blocked_by[{kind,url}] ·
     verdict(match|title_absent|no_text|unreadable) · verify_detail · bytes · sha256 · path ·
-    free_at_publisher · elapsed_s
+    free_at_publisher · is_oa · oa_status · paywall · paywalled · elapsed_s
 
 退出码：`0` 拿到 PDF · `1` 用法错 · `2` 所有路线空手 · `7` 被 bot 墙挡住（不是论文的问题）。
 
@@ -103,6 +106,7 @@ RPC 冒烟：ping/fetch/未知方法/shutdown 四帧全对，stdout 纯协议帧
 
 政策没变：**不绕付费墙**（不做机构代理、不含 Sci-Hub）。变的是「closed 也值得试一次出版商的正文页」——
 机构 IP（校网/VPN）在的时候那一次就是唯一的路，不在的时候它几十秒内以「付费墙」收尾。
+**这个开关是 `LITFETCH_PAYWALL`（默认 `1`）/ `--no-paywall` / RPC 的 `paywall` 参数**，关掉就回到老行为。
 
 * layer2 门槛（`_l2_candidates`）：确认非 OA 且 PubMed 不 free 时，**只**为出版商页（rank 0，或 doi.org
   那条 `doi_resolver`）开一次窗；落地页里只有仓库/预印本页面时仍然不开。

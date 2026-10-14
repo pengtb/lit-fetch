@@ -31,11 +31,13 @@
     LITFETCH_EMAIL=you@example.com          # Unpaywall/Crossref 要求带真邮箱，不填就跳过那条路线
     LITFETCH_PROFILE=C:\Users\you\.litfetch_profile   # 浏览器 profile 目录（默认 ~/.litfetch_profile）
     LITFETCH_FIXTURES=out\fixtures.json     # realcheck.py 的标题夹具（可选）
+    LITFETCH_LAYER1=0                       # 不跑 HTTP 阶梯（默认 1=跑）；只把 doi.org 入口留给 layer2
+    LITFETCH_LAYER2=0                       # 不开浏览器（默认 1=开）
     LITFETCH_PAYWALL=0                      # 关掉「付费刊也试一次出版商正文页」（默认 1=试）
 
 `LITFETCH_PROFILE` 里存着各站点的 `cf_clearance`，换目录等于把已过的 Cloudflare 挑战丢掉 —— 见下面那节。
-`LITFETCH_PAYWALL` 只管付费刊那一次尝试，与开放获取的路线无关；命令行对应 `--no-paywall`，
-RPC 对应 `fetch` 的 `paywall` 参数（插件用它做设置开关）。
+三个开关命令行分别是 `--no-layer1` / `--no-layer2`（`--no-browser` 是它的别名）/ `--no-paywall`，
+RPC 分别是 `layer1` / `layer2` / `paywall` 三个参数。`paywall` 只管付费刊那一次尝试，与开放获取的路线无关。
 
 ## 契约
 
@@ -43,7 +45,7 @@ JSON envelope（`--json` 时 stdout 只有这一行，诊断全在 stderr）：
 
     schema · input · kind · value · ok · route · url · tried[] · blocked_by[{kind,url}] ·
     verdict(match|title_absent|no_text|unreadable) · verify_detail · bytes · sha256 · path ·
-    free_at_publisher · is_oa · oa_status · paywall · paywalled · elapsed_s
+    free_at_publisher · is_oa · oa_status · paywall · paywalled · layer1 · layer2 · elapsed_s
 
 退出码：`0` 拿到 PDF · `1` 用法错 · `2` 所有路线空手 · `7` 被 bot 墙挡住（不是论文的问题）。
 
@@ -57,6 +59,10 @@ RPC（一行一个 JSON，stdout 只出协议帧）：
     ← {"jsonrpc":"2.0","id":1,"result":{...envelope..., "exit_code":0}}
 
 方法：`ping` · `fetch` · `shutdown`。
+
+`fetch` 的可选参数：`identifier` · `out` · `title` · `email` · `engine` ·
+`layer1`（默认 true）· `layer2`（默认 true；老插件发的名字是 `allow_browser`）· `paywall`（默认 true）。
+三个开关的语义见「付费刊」那节和下面的配置表 —— 插件设置面板就接这三个（外加 engine/email）。
 
 ## 今天实测（2026-10-10，校园网直连，无代理）
 
@@ -122,6 +128,18 @@ RPC 冒烟：ping/fetch/未知方法/shutdown 四帧全对，stdout 纯协议帧
 
 配套的加固：每个候选一个新页面；上下文整个挂了就重启一次浏览器再继续；浏览器侧也吃到
 `403/429` 就跳过该候选（否则单候选三种方法串起来要两分钟）。
+
+## 三个开关（插件设置面板对应它们，2026-10-14 实测）
+
+* `layer1=false`（`--no-layer1` / `LITFETCH_LAYER1=0`）：不跑 HTTP 阶梯 —— 一个元数据 API 都不问，
+  只把 `https://doi.org/<doi>` 那条入口交给 layer2。实测 `arXiv:2610.04475` + `--no-layer1` 是
+  **0.0s 空手**（arXiv 没有 doi.org 入口可兜，`tried=[]`）；DOI 则由浏览器从落地页自己找。
+* `layer2=false`（`--no-layer2`，别名 `--no-browser`）：不开浏览器。实测 Cell 那条停在 layer1 的
+  HTTP 403（`blocked_by=[cf_challenge]`，exit 7）。
+* `paywall=false`（`--no-paywall` / `LITFETCH_PAYWALL=0`）：付费刊那一次尝试都不做（见上节）。
+  实测关掉后 closed 直接 exit 2、`tried` 里没有 `cell_press_pdf`、也不开窗。
+
+三个开关都进 envelope（`layer1` / `layer2` / `paywall` + `paywalled`），插件可以据此显示当前状态。
 
 ## Cloudflare 挑战：第一次遇到某个站点时（实测流程）
 

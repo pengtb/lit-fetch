@@ -88,7 +88,11 @@ def _handle(req: dict) -> dict | None:
     env = lf.fetch(str(ident), Path(params["out"]) if params.get("out") else None,
                    title=params.get("title", ""), email=params.get("email", lf.CONTACT),
                    engine=params.get("engine", "edge"),
-                   allow_browser=params.get("allow_browser", True), quiet=True,
+                   # layer2 是新的名字；allow_browser 是插件老版本发过来的名字，留着兼容
+                   allow_browser=bool(params.get("layer2",
+                                                 params.get("allow_browser", lf.LAYER2_DEFAULT))),
+                   layer1=bool(params.get("layer1", lf.LAYER1_DEFAULT)),
+                   quiet=True,
                    paywall=bool(params.get("paywall", lf.TRY_PAYWALL_DEFAULT)),
                    on_progress=hook)
     env["exit_code"] = lf.exit_code(env)

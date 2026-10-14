@@ -157,6 +157,12 @@ def run() -> int:
         assert lf._env_flag("SELF_CHECK_FLAG", True) is True, v
     del os.environ["SELF_CHECK_FLAG"]
 
+    # 两层开关：layer1 关掉 + layer2 关掉 = 一个请求都不发、直接空手回来（arXiv 没有 doi.org 入口可兜）
+    env = lf.fetch("arXiv:2610.04475", layer1=False, allow_browser=False, quiet=True)
+    assert env["ok"] is False and env["tried"] == [], env
+    assert env["layer1"] is False and env["layer2"] is False, env
+    assert (lf.LAYER1_DEFAULT, lf.LAYER2_DEFAULT, lf.TRY_PAYWALL_DEFAULT) == (True, True, True)
+
     # 出版商优先只对期刊 DOI 成立（预印本自己就是"出版商"，走 browser_first 最快）
     P0 = [("https://publisher.example/x.pdf", "pub_pdf", 0)]
     L0 = [("https://doi.org/10.1/x", "unpaywall", 0)]
@@ -289,7 +295,7 @@ def run() -> int:
 
     print("selfcheck OK：标识符 11 例 / 坏输入 3 例 / MDPI 2 例 / EPMC 3 例 / 退出码 4 例 / "
           "标题归一 2 例 / 直链判定 10 例 / bioRxiv 特例 4 例 / 下载取件 3 例 / "
-          "出版商直链 5 例 / location 排序 6 例 / layer2 门槛 8 例 / Cell Press PII 6 例 / paywall 开关 11 例 / 版本分层 3 例")
+          "出版商直链 5 例 / location 排序 6 例 / layer2 门槛 8 例 / Cell Press PII 6 例 / paywall 开关 11 例 / 两层开关 4 例 / 版本分层 3 例")
     return 0
 
 

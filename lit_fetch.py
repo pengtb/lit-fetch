@@ -80,6 +80,13 @@ _UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
 # RPC 那边插件用 `paywall` 参数覆盖。
 TRY_PAYWALL_DEFAULT = _env_flag("LITFETCH_PAYWALL", True)
 
+# 两层各自的开关（插件设置面板给三个勾：layer1 / layer2 / paywall）。
+# layer1 关掉 = 不跑任何 HTTP 路线阶梯（unpaywall/S2/EPMC/arXiv/MDPI/出版商直链/落地页 meta），
+#   只留 `https://doi.org/<doi>` 那条入口给 layer2 —— 单跑浏览器那层，快、且不问任何元数据 API。
+# layer2 关掉 = 不开浏览器（等价于原来的 `--no-browser` / `allow_browser=False`）。
+LAYER1_DEFAULT = _env_flag("LITFETCH_LAYER1", True)
+LAYER2_DEFAULT = _env_flag("LITFETCH_LAYER2", True)
+
 
 def hdrs(email: str = "") -> dict:
     ua = _UA + (f" lit-fetch/0.1 (mailto:{email})" if email else " lit-fetch/0.1")
@@ -537,8 +544,8 @@ def _defer_low_versions(cands: list[tuple[str, str, int]], prefer_pub: bool
 
 
 def fetch(raw_id: str, out: Path | None = None, title: str = "", email: str = "",
-          engine: str = "edge", allow_browser: bool = True, quiet: bool = False,
-          paywall: bool = TRY_PAYWALL_DEFAULT,
+          engine: str = "edge", allow_browser: bool = LAYER2_DEFAULT, quiet: bool = False,
+          layer1: bool = LAYER1_DEFAULT, paywall: bool = TRY_PAYWALL_DEFAULT,
           on_progress: Callable[[str], None] | None = None) -> dict:
     started = time.time()
     tried: list[str] = []
@@ -569,7 +576,11 @@ def fetch(raw_id: str, out: Path | None = None, title: str = "", email: str = ""
     free_at_publisher = False
     is_oa: bool | None = None
     oa_status: str | None = None
-    if ident["kind"] == "arxiv":
+    if not layer1:
+        # layer1 关掉：整段阶梯不跑（一个元数据 API 都不问）。带 DOI 的标识符还能靠下面那条
+        # doi.org 入口进 layer2；别的标识符（arXiv/PMID）没有 layer2 可走，等于空手。
+        note("[layer1] 关掉了（layer1=false）→ 不跑 OA 阶梯；只有 doi.org 那条入口留给 layer2")
+    elif ident["kind"] == "arxiv":
         cands = [(u, r, 3) for u, r in arxiv_pdf_urls(ident)]
     elif ident["kind"] == "preprint":
         cands = [(u, r, 3) for u, r in preprint_candidates(ident, email)]   # 预印本自己的直链先试
@@ -585,7 +596,7 @@ def fetch(raw_id: str, out: Path | None = None, title: str = "", email: str = ""
     # - bioRxiv：这一站只有「浏览器直接下载」成过（见 README），问 unpaywall/S2/Europe PMC 只会
     #   换来同一堵 CF 墙或别的站点的副本，白花几秒、还在 CF 那儿多记几笔 → 它的直链直接进 layer2。
     # - medRxiv：它自己那两条直链（early / v.full.pdf）在 layer1 就能 200，本来也不需要这阶梯。
-    if ident["kind"] == "doi" and re.match(r"^10\.", ident["value"]):
+    if layer1 and ident["kind"] == "doi" and re.match(r"^10\.", ident["value"]):
         doi = ident["value"]
         cands += [(u, r, 0) for u, r in publisher_pdf_candidates(doi)]   # 出版商直链：便宜，且是正文
         if paywall:      # Cell Press 那条是「试付费刊」的一部分（多一次 Crossref 请求），关掉就不问
@@ -744,6 +755,7 @@ def fetch(raw_id: str, out: Path | None = None, title: str = "", email: str = ""
            "sha256": hashlib.sha256(body).hexdigest() if body else None,
            "path": None, "free_at_publisher": free_at_publisher,
            "is_oa": is_oa, "oa_status": oa_status, "paywall": paywall,
+           "layer1": layer1, "layer2": allow_browser,
            "elapsed_s": round(time.time() - started, 1)}
 
     if body and out:
@@ -805,14 +817,19 @@ def main(argv: list[str]) -> int:
     ap.add_argument("--title", default="")
     ap.add_argument("--email", default=CONTACT)
     ap.add_argument("--engine", default="edge", choices=["edge", "chrome", "chromium"])
-    ap.add_argument("--no-browser", action="store_true")
+    ap.add_argument("--no-browser", "--no-layer2", dest="no_layer2", action="store_true",
+                    help="只用 layer1（HTTP），不开浏览器（也可用 LITFETCH_LAYER2=0）")
+    ap.add_argument("--no-layer1", action="store_true",
+                    help="不跑 HTTP 阶梯，直接把 doi.org 那条入口交给 layer2（也可用 LITFETCH_LAYER1=0）")
     ap.add_argument("--no-paywall", action="store_true",
                     help="不去试付费刊的出版商正文页（默认试一次；也可用 LITFETCH_PAYWALL=0）")
     ap.add_argument("--json", action="store_true")
     a = ap.parse_args(argv)
 
     env = fetch(a.identifier, Path(a.out) if a.out else None, title=a.title, email=a.email,
-                engine=a.engine, allow_browser=not a.no_browser, quiet=a.json,
+                engine=a.engine, quiet=a.json,
+                allow_browser=False if a.no_layer2 else LAYER2_DEFAULT,
+                layer1=False if a.no_layer1 else LAYER1_DEFAULT,
                 paywall=False if a.no_paywall else TRY_PAYWALL_DEFAULT)
     if a.json:
         print(json.dumps(env, ensure_ascii=False))

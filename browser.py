@@ -455,11 +455,18 @@ def _landing_grab(page, url: str, quiet: bool) -> tuple[bytes | None, str | None
         body = _b64(page.evaluate(JS_FETCH, meta))
     except Exception as e:
         _log(f"  页面内 fetch 失败: {str(e)[:60]}", quiet)
-        return None, why or "meta_fetch_failed"
+        body = None
     if body:
         _log(f"  页面内 fetch → {len(body)}B", quiet)
         return body, None
-    return None, why or "meta_not_pdf"
+    # ponytail: 页内 fetch 被拒 ≠ 拿不到。出版商的 PDF 端点常常只认「导航」——OUP/silverchair 就是
+    # （子请求 403 / `Failed to fetch`，导航过去照样下）。所以退一步走 ② 那套「让浏览器把它当下载交出来」。
+    # 实测 10.1093/bib/bbag439：落地页给出 citation_pdf_url → 页内 fetch 失败 → 导航式下载拿到文件。
+    _log("  页内 fetch 没拿到 → 改成导航式下载再试一次", quiet)
+    nav_body, nav_why = _download_via_nav(page, meta, quiet)
+    if nav_body:
+        return nav_body, None
+    return None, why or nav_why or "meta_fetch_failed"
 
 
 def fetch_with_browser(blocked: list[dict], out: Path | None, title: str = "",

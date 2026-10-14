@@ -408,11 +408,19 @@ def _landing_grab(page, url: str, quiet: bool) -> tuple[bytes | None, str | None
     可截，唯一值得做的就是 ③。返回 (body, why)。
     """
     why = None
+    t0 = time.time()
     try:
         resp = page.goto(url, wait_until="domcontentloaded", timeout=NAV_TIMEOUT_MS)
         why = f"http_{resp.status}" if resp and resp.status >= 400 else None
     except Exception as e:
         _log(f"  导航失败 {type(e).__name__}", quiet)
+        # ponytail: 落地页候选里也可能混着「一导航就开始下载」的端点（判成直链那套靠 URL 形态，
+        # 形态没覆盖到就会落到这儿）。那时 goto 必抛、但文件已经在写盘 —— 先看 10s 磁盘再认输，
+        # 否则就是「文件都下好了却没捕捉到」。
+        body = _wait_fresh_download(t0, quiet=quiet, timeout=10, stall_s=3)
+        if body:
+            _log(f"  导航失败，但下载已经落盘 → {len(body)}B", quiet)
+            return body, None
         return None, "nav_failed"
     if _challenged(page):
         if not _settle(page, quiet, "导航"):

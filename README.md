@@ -1,7 +1,8 @@
 # lit-fetch
 
 两层文献 PDF 抓取器：**layer1 纯 HTTP** 走开放获取路线，**layer2 真浏览器** 只兜底「有源但被 bot 墙挡住」
-的情况。只做开放获取——不碰付费墙、不做机构代理、不含 Sci-Hub。参考实现是 `paper-fetch`（MIT），
+的情况。**不绕付费墙**：不做机构代理、不含 Sci-Hub。机构 IP（校网/VPN）在的时候，付费刊也试一次出版商
+自己的正文页 —— 拿得到算拿到，拿不到照旧报「付费墙」（见下面那节）。参考实现是 `paper-fetch`（MIT），
 抄了它的路线思路与校验方法，砍掉了 TDM/机构/ClinicalKey 那一整套。
 
 ## 装
@@ -97,6 +98,23 @@ RPC 冒烟：ping/fetch/未知方法/shutdown 四帧全对，stdout 纯协议帧
    代价是它有时会让整个 Edge 上下文直接退出（控制 PDF 也能复现），所以现在只当备用。
 3. **真导航 + 带 token 终址**：导航后响应头是 `application/pdf` 时，取 302 后的终址再用浏览器上下文
    取一次（OUP/silverchair 那条：1.71MB）。会撞 429 的站点（bioRxiv）在这条上必然失败。
+
+## 付费刊（Unpaywall 说 closed）怎么走（2026-10-14 实测）
+
+政策没变：**不绕付费墙**（不做机构代理、不含 Sci-Hub）。变的是「closed 也值得试一次出版商的正文页」——
+机构 IP（校网/VPN）在的时候那一次就是唯一的路，不在的时候它几十秒内以「付费墙」收尾。
+
+* layer2 门槛（`_l2_candidates`）：确认非 OA 且 PubMed 不 free 时，**只**为出版商页（rank 0，或 doi.org
+  那条 `doi_resolver`）开一次窗；落地页里只有仓库/预印本页面时仍然不开。
+* Cell Press（`10.1016/`）：`https://www.cell.com/action/showPdf?pii=<PII>` 是免 token 的正文入口。
+  PII 不在 DOI 里，用 Crossref 的 `alternative-id`（`S0092867426011190` → `S0092-8674(26)01119-0`）。
+  **必须判成直链**（`_looks_like_pdf` 认 `showpdf`）：它一导航就开始下载，被当落地页喂给
+  `_landing_grab` 只会得到一个 `goto` 异常。
+  * 反例（为什么不用落地页那条）：同一条 DOI 的落地页是 doi.org → linkinghub → **sciencedirect**，
+    那一页既没有 `citation_pdf_url`，`pdfft?md5=…` 导航过去也不落盘（50s 无文件）。
+  * 实测 `10.1016/j.cell.2026.09.017`：HTTP 层 403（cf_challenge，0.3s）→ layer2 `route.fetch` 403 →
+    ②下载 → **11,110,651B `%PDF-1.7` / 36 页 / 标题命中 100%**，`exit 0`，全程不用人点
+    （cell.com 的 CF 挑战在自动化窗口里 ~5s 自己过）。
 
 配套的加固：每个候选一个新页面；上下文整个挂了就重启一次浏览器再继续；浏览器侧也吃到
 `403/429` 就跳过该候选（否则单候选三种方法串起来要两分钟）。

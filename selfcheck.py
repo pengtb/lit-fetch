@@ -79,7 +79,8 @@ def run() -> int:
     for u in ("https://x.org/a.pdf", "https://x.org/a.pdf?download=1",
               "https://onlinelibrary.wiley.com/doi/pdfdirect/10.1/x?download=true",
               "https://academic.oup.com/nar/article-pdf/50/D1/D988/1/x.pdf",
-              "https://europepmc.org/articles/PMC1?pdf=render"):
+              "https://europepmc.org/articles/PMC1?pdf=render",
+              "https://www.cell.com/action/showPdf?pii=S0092-8674(26)01119-0"):
         assert lf._looks_like_pdf(u), u
     for u in ("https://doi.org/10.1/x", "https://journals.plos.org/ploscompbiol/article?id=10.1/x",
               "https://pmc.ncbi.nlm.nih.gov/articles/PMC1/", ""):
@@ -109,15 +110,38 @@ def run() -> int:
                  "url_for_pdf": "https://www.embopress.org/action/downloadSupplement?file=x_MOESM2_ESM.pdf"}) == 4
     assert rank({"url": "https://x.org/suppl/data.pdf"}) == 4
 
-    # layer2 的门槛：被墙的候选优先；空手但落地页还在 → 用落地页顶；确认非 OA 且 PubMed 也不 free → 不开
+    # Cell Press：PII 两种写法互转（DOI 里没有 PII，Crossref 的 alternative-id 才是那串紧凑形式）
+    assert lf._hyphen_pii("S0092867426011190") == "S0092-8674(26)01119-0"
+    assert lf._hyphen_pii("S009286742601119") is None         # 少一位
+    assert lf._hyphen_pii("") is None
+    assert lf._hyphen_pii(None) is None
+    assert lf.cell_press_pdf_candidates("10.1038/x") == []    # 非 Elsevier 不碰网络
+    _real_json, lf._get_json = lf._get_json, lambda *a, **k: {"message": {"alternative-id": ["S0092867426011190"]}}
+    try:
+        got = lf.cell_press_pdf_candidates("10.1016/j.cell.2026.09.017")
+    finally:
+        lf._get_json = _real_json
+    assert got == [("https://www.cell.com/action/showPdf?pii=S0092-8674(26)01119-0",
+                    "cell_press_pdf")], got
+
+    # layer2 的门槛：被墙的候选优先；空手但落地页还在 → 用落地页顶；确认非 OA 且 PubMed 也不 free 时
+    # **只**为出版商页（rank 0 / doi_resolver）开窗（机构 IP 下这条路实测能成），仓库页不开。
     B = [{"kind": "cf_challenge", "url": "https://x/y.pdf"}]
     L = [("https://doi.org/10.1016/j.cell.2026.08.042", "unpaywall", 0)]
     assert lf._l2_candidates(B, L, None, False) == B
     assert lf._l2_candidates([], L, True, False) == [{"kind": "landing", "url": L[0][0]}]
     assert lf._l2_candidates([], L, None, False) == [{"kind": "landing", "url": L[0][0]}]
     assert lf._l2_candidates([], L, False, True) == [{"kind": "landing", "url": L[0][0]}]
-    assert lf._l2_candidates([], L, False, False) == []
+    assert lf._l2_candidates([], L, False, False) == [{"kind": "landing", "url": L[0][0]}]
     assert lf._l2_candidates([], [], True, False) == []
+    # closed + 落地页里只有 doi_resolver（rank 4）也要开 —— 它就是出版商页（10.1016/j.cell.2026.09.017）
+    R = [("https://pmc.ncbi.nlm.nih.gov/articles/PMC1/", "unpaywall", 2),
+         ("https://doi.org/10.1016/j.cell.2026.09.017", "doi_resolver", 4)]
+    assert lf._l2_candidates([], R, False, False) == [
+        {"kind": "landing", "url": "https://doi.org/10.1016/j.cell.2026.09.017"}]
+    # closed + 只有仓库/预印本落地页 → 还是不开窗
+    assert lf._l2_candidates([], [("https://pmc.ncbi.nlm.nih.gov/articles/PMC1/", "unpaywall", 2)],
+                             False, False) == []
 
     # 出版商优先只对期刊 DOI 成立（预印本自己就是"出版商"，走 browser_first 最快）
     P0 = [("https://publisher.example/x.pdf", "pub_pdf", 0)]
@@ -250,8 +274,8 @@ def run() -> int:
         probe.unlink()
 
     print("selfcheck OK：标识符 11 例 / 坏输入 3 例 / MDPI 2 例 / EPMC 3 例 / 退出码 4 例 / "
-          "标题归一 2 例 / 直链判定 9 例 / bioRxiv 特例 4 例 / 下载取件 3 例 / "
-          "出版商直链 5 例 / location 排序 6 例 / layer2 门槛 6 例 / 版本分层 3 例")
+          "标题归一 2 例 / 直链判定 10 例 / bioRxiv 特例 4 例 / 下载取件 3 例 / "
+          "出版商直链 5 例 / location 排序 6 例 / layer2 门槛 8 例 / Cell Press PII 6 例 / 版本分层 3 例")
     return 0
 
 

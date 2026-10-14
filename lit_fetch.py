@@ -134,7 +134,9 @@ class Blocked(Exception):
 
 
 # ponytail: 直链 vs 落地页的分辨只看 URL 形态——够用，且不花一次请求。
-_PDFISH = re.compile(r"\.pdf($|[?#])|[?&]pdf=|pdfdirect|/pdf/|article-pdf|full\.pdf|"
+# showpdf 是 cell.com 的正文端点（`/action/showPdf?pii=<PII>`，实测 11MB %PDF-1.7）：它一导航就开始
+# 下载，被当落地页喂给 _landing_grab 只会得到一个 goto 异常 —— 判成直链才会走 ②那套「等下载」。
+_PDFISH = re.compile(r"\.pdf($|[?#])|[?&]pdf=|pdfdirect|/pdf/|article-pdf|full\.pdf|showpdf|"
                      r"type=printable|getfreepdf|counter/pdf", re.I)
 
 
@@ -314,6 +316,33 @@ def publisher_pdf_candidates(doi: str) -> list[tuple[str, str]]:
     return out
 
 
+def _hyphen_pii(compact: str) -> str | None:
+    """Elsevier 的 PII 两种写法互转：`S0092867426011190` → `S0092-8674(26)01119-0`。"""
+    m = re.match(r"^(S\d{4})(\d{4})(\d{2})(\d{5})(\d)$", compact or "")
+    return f"{m[1]}-{m[2]}({m[3]}){m[4]}-{m[5]}" if m else None
+
+
+def cell_press_pdf_candidates(doi: str, email: str = "") -> list[tuple[str, str]]:
+    """Cell Press（Elsevier）免 token 的正文入口：`https://www.cell.com/action/showPdf?pii=<PII>`。
+
+    PII 不在 DOI 里，但 Crossref 的 `alternative-id` 就是它（实测 10.1016/j.cell.2026.09.017 →
+    S0092867426011190），比解析 doi.org 便宜也稳。
+
+    为什么非走这条（实测 2026-10，校网机构 IP）：同一条 DOI 的落地页是 doi.org → linkinghub →
+    **sciencedirect**，那一页既没有 citation_pdf_url，`pdfft?md5=…` 导航过去也不落盘（50s 无文件）；
+    而 cell.com 这条 11,110,651B `%PDF-1.7`。没有机构订阅时它是 403/CF 墙 —— 那也是 layer2 的
+    正常输入，不额外花什么。非 Cell Press 的 Elsevier 刊（jmb 之类）会 404，只是多一条候选。
+    """
+    if not re.match(r"^10\.1016/", doi or ""):
+        return []
+    j = _get_json(f"https://api.crossref.org/works/{doi}", email) or {}
+    for alt in (j.get("message") or {}).get("alternative-id") or []:
+        pii = _hyphen_pii(alt)
+        if pii:
+            return [(f"https://www.cell.com/action/showPdf?pii={pii}", "cell_press_pdf")]
+    return []
+
+
 def epmc_render(url: str) -> str | None:
     """PMC 落地页/PDF 链接 → Europe PMC render 端点（PMC 自己上了 reCAPTCHA）。"""
     m = re.search(r"(?:pmc\.ncbi\.nlm\.nih\.gov/articles/|/articles/)?(PMC\d{5,})", url or "")
@@ -416,9 +445,12 @@ def _norm(s: str) -> list[str]:
 def title_verdict(pdf: bytes, title: str) -> tuple[str, str]:
     """返回 (verdict, detail)。verdict: match | title_absent | no_text | unreadable。"""
     try:
-        import fitz  # PyMuPDF
+        import pymupdf as fitz  # 新名字：`import fitz` 会往 stdout 打弃用警告，把 --json 的输出弄脏
     except ImportError:
-        return "unreadable", "pymupdf 未安装，跳过内容校验"
+        try:
+            import fitz         # 老版本 PyMuPDF 只有这个名字
+        except ImportError:
+            return "unreadable", "pymupdf 未安装，跳过内容校验"
     try:
         doc = fitz.open(stream=pdf, filetype="pdf")
     except Exception as e:
@@ -449,12 +481,17 @@ def _l2_candidates(blocked: list[dict], landings: list[tuple[str, str, int]],
     ① 有被墙的候选 → 原样给（老行为）。② 一个候选都没试出来、落地页链还在 → 用落地页顶上：
     Elsevier 那种 doi.org → linkinghub 跳转壳 → CF 墙，跳转和墙都只有浏览器跟得动，而落地页上
     的 citation_pdf_url 正是 browser.py 里现成的分支（只是以前没被喂过）。
-    ③ Unpaywall 明说不是 OA 且 PubMed 也没标 free → 不开窗，那是付费样本，白开。
+    ③ Unpaywall 明说不是 OA 且 PubMed 也没标 free → **本来是「不开窗，白开」**；2026-10 改成：
+       落地页里有**出版商页**（rank 0，或 doi.org 那条 doi_resolver）就照开一次。实测
+       10.1016/j.cell.2026.09.017（closed）：校网 VPN 的机构 IP 下，cell.com 文章页的 CF 挑战 5s
+       自己过掉、页面里 citation_pdf_url → `/cell/pdf/<PII>.pdf` 直接下成；没机构订阅时它也只是
+       几十秒内以「付费墙」收尾，代价可接受。仓库/预印本的落地页对 closed 没意义，仍然不开。
     """
     if blocked:
         return blocked
+    pub = [(u, r) for u, r, rk in landings if rk == 0 or r == "doi_resolver"]
     if is_oa is False and not free_at_publisher:
-        return []
+        return [{"kind": "landing", "url": u} for u, _ in pub]
     return [{"kind": "landing", "url": u} for u, _, _ in landings]
 
 
@@ -537,6 +574,7 @@ def fetch(raw_id: str, out: Path | None = None, title: str = "", email: str = ""
     if ident["kind"] == "doi" and re.match(r"^10\.", ident["value"]):
         doi = ident["value"]
         cands += [(u, r, 0) for u, r in publisher_pdf_candidates(doi)]   # 出版商直链：便宜，且是正文
+        cands += [(u, r, 0) for u, r in cell_press_pdf_candidates(doi, email)]   # Cell Press 那条
         for name, fn in (("unpaywall", lambda: unpaywall_candidates(doi, email)),
                          ("s2", lambda: s2_candidates(doi, email)),
                          ("europepmc", lambda: pmcid_candidates(doi, email))):
@@ -712,11 +750,13 @@ def fetch(raw_id: str, out: Path | None = None, title: str = "", email: str = ""
                 env["needs_human"] = bool(l2.get("needs_human"))
 
     # 付费墙：Unpaywall 明说不是 OA、PubMed 也没标 free、最后两手都没拿到 → 这不是「被墙」，
-    # 是没有可下载副本（付费样本只能靠机构订阅）。插件/脚本据此给一句不同的提示。
+    # 是没有可下载副本。2026-10 起付费样本也会走一次出版商页（机构 IP 下能成），所以提示分两种说法，
+    # 别把「没试过」说成「试过」。
     env["paywalled"] = bool(is_oa is False and not free_at_publisher and not env.get("ok"))
     if env["paywalled"]:
-        note(f"  · 付费墙（Unpaywall oa_status={oa_status or 'closed'}）：没有 OA 副本 —— "
-             f"这是付费样本，不是被墙")
+        how = "出版商页也试过（浏览器），没拿到" if l2 is not None else "没开浏览器"
+        note(f"  · 付费墙（Unpaywall oa_status={oa_status or 'closed'}）：没有 OA 副本，{how} —— "
+             f"有机构订阅（校网/VPN）时才拿得到，不是被墙")
 
     env["elapsed_s"] = round(time.time() - started, 1)
     return env

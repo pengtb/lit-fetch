@@ -5,6 +5,9 @@
 自己的正文页 —— 拿得到算拿到，拿不到照旧报「付费墙」（见下面那节）。参考实现是 `paper-fetch`（MIT），
 抄了它的路线思路与校验方法，砍掉了 TDM/机构/ClinicalKey 那一整套。
 
+配套的 Zotero 插件在 [`pengtb/zotero-litfetch`](https://github.com/pengtb/zotero-litfetch)：右键条目补 PDF，
+三个开关（`layer1` / `layer2` / `paywall`）和界面语言都在它的设置面板里。
+
 ## 装
 
     uv venv --python 3.11 .venv
@@ -78,6 +81,15 @@ RPC（一行一个 JSON，stdout 只出协议帧）：
 
 RPC 冒烟：ping/fetch/未知方法/shutdown 四帧全对，stdout 纯协议帧，arXiv 那篇 1.96MB 落盘。
 
+## 2026-10-14 复核（校网 VPN；注意 VPN 是系统级的，自动化浏览器同样吃机构 IP）
+
+| 输入 | 结果 |
+|---|---|
+| `10.1016/j.cell.2026.09.017`（Cell，closed） | exit 0 · route=browser:edge · 11,110,651B · 36 页 · 标题 100%（走新加的 `cell_press_pdf`） |
+| `10.1093/bib/bbag439`（OUP，落地页那条） | exit 0 · route=browser:edge · 2,690,419B · 25 页 · 标题 100% |
+| `10.1093/bioinformatics/btag482`（OUP，`advance-article-pdf` 那条） | 时通时不通：成的几次 exit 0 / 4.93MB；不通的那次卡在 `advance-article-pdf` 路径上的真 CF 挑战（60s 没过，需要点一下或重试） |
+| `10.1038/s41586-020-2649-2`、`10.1186/s12959-025-03781-6` 等 OA 刊 | 无回归，`route=unpaywall` / `springer_pdf` 照旧 |
+
 ## layer2 取字节的三条路（按顺序试）
 
 0. **bioRxiv / medRxiv 特例：只有「浏览器直接下载」这一条**。这两个站点对任何**二次**请求
@@ -107,6 +119,17 @@ RPC 冒烟：ping/fetch/未知方法/shutdown 四帧全对，stdout 纯协议帧
    代价是它有时会让整个 Edge 上下文直接退出（控制 PDF 也能复现），所以现在只当备用。
 3. **真导航 + 带 token 终址**：导航后响应头是 `application/pdf` 时，取 302 后的终址再用浏览器上下文
    取一次（OUP/silverchair 那条：1.71MB）。会撞 429 的站点（bioRxiv）在这条上必然失败。
+
+**落地页候选不走上面这三条**，走 `_landing_grab()`：导航 → 等它跳完（meta refresh / JS）→ 读
+`citation_pdf_url` → 页面内 fetch。两个坑（都为 OUP/silverchair 实测所得）：
+
+* 页内 fetch 被拒（`TypeError: Failed to fetch`）**不等于拿不到**：出版商的 PDF 端点常常只认「导航」
+  （子请求 403 / 被拒，导航过去照样下）。所以页内 fetch 失败会退到 ②「让浏览器当下载交出来」。
+  实测 `10.1093/bib/bbag439`：落地页给出 `academic.oup.com/bib/article-pdf/…`，页内 fetch 失败 →
+  导航式下载 → **2,690,419B `%PDF-1.7` / 25 页 / 标题 100%**，exit 0（改前 exit 7）。
+* 一开始把落地页当「可能直返 PDF 的候选」喂给 ① 是错的：① 会 `fulfill(204)` 把这次导航吞掉，页面停在
+  about:blank（用户看到白屏），跳转壳永远跳不动；② 再干等 420s，候选预算（60s）早爆，真正有用的
+  「读 citation_pdf_url」一次都轮不到。
 
 ## 付费刊（Unpaywall 说 closed）怎么走（2026-10-14 实测）
 
@@ -189,10 +212,10 @@ exit 0、`route=browser:edge`、**36,880,144B**（与 2025 年那次成功的大
 ## 文件
 
     lit_fetch.py    标识符归一化 · 路线阶梯 · 校验 · CLI
-    browser.py      layer2：Edge + 挑战判定（自动/需真人）+ 导航终址取字节
-    rpc_server.py   stdio JSON-RPC 2.0
-    selfcheck.py    离线断言（标识符 11 例 / MDPI 2 例 / EPMC 3 例 / 退出码 4 例 / 直链判定 9 例）
+    browser.py      layer2：Edge + 挑战判定（自动/需真人）+ route.fetch/下载/落地页三条取字节路
+    rpc_server.py   stdio JSON-RPC 2.0（插件用；按 mtime 热重载 lit_fetch/browser）
+    selfcheck.py    离线断言 16 组（跑 `--selfcheck` 看清单：标识符、路线阶梯、layer2 门槛、开关…）
     realcheck.py    联网跑那 6 个已知用例
     PLAN.zh.md      设计计划与调研结论
 
-下一步：Zotero 插件（菜单项 + 设置面板 + 起 RPC 子进程 + `Zotero.Attachments.importFromFile` 挂附件）。
+配套插件：<https://github.com/pengtb/zotero-litfetch>（菜单 + 设置面板 + RPC 子进程 + 附件挂回条目）。

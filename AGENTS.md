@@ -6,8 +6,9 @@
 
 - 两层：layer1 纯 HTTP（开放获取路线阶梯），layer2 真浏览器（只兜底 bot 墙/跳转壳/只认导航的端点）。
 - **不绕付费墙**：不做机构代理、不接 TDM API、不含 Sci-Hub。机构 IP（校网/VPN）在时，只对
-  「Unpaywall 说 closed、PubMed 也没标 free」的文献，用出版商自己的正文页试一次（`paywall` 开关）。
-- 代理默认只作用于「付费刊那次探测」，OA 路线保持直连；`--proxy-all` 才是整条链路全走。
+  「非 OA 或判断不了 OA」的文献，用出版商自己的正文页试一次（`paywall` 开关）。
+- 代理默认只作用于「付费刊那次探测」（含**判断不了 OA** 的情况），确定 OA 的路线保持直连；
+  `--proxy-all` 才是整条链路全走。
 - 拿不到就报「付费墙」（exit 2）或「被墙」（exit 7），不要用「通常/应该」糊过去。
 
 ## 文件
@@ -15,7 +16,7 @@
     lit_fetch.py    标识符归一化 · 路线阶梯 · 校验 · CLI
     browser.py      layer2：Edge + 挑战判定（自动/需真人）+ 三条取字节路
     rpc_server.py   stdio JSON-RPC 2.0（插件用；按 mtime 热重载 lit_fetch/browser）
-    selfcheck.py    离线断言（含代理 16 例）
+    selfcheck.py    离线断言（含代理 20 例）
     selfcheck_layer2.py  layer2 的 route.fetch 验收（控制用 dummy.pdf）
     realcheck.py    联网跑已知用例（夹具见 LITFETCH_FIXTURES）
     probe_tabs.py   probe_rpc/浏览器调试用的小脚本
@@ -87,8 +88,9 @@ layer2 用系统已装的 Edge（`channel=msedge`），不下载浏览器构建�
   `_PROXY_FORCE`（fetch 内部临时开：付费刊探测段）。
 - `_proxies()`：`_ACTIVE_PROXY_ALL or _PROXY_FORCE` 时返回 `{"http": p, "https": p}`，否则空 dict
   （保持 requests 默认：环境变量 / Windows 系统代理）。
-- `_is_paywall_probe(is_oa, free_at_publisher, paywall)` 判定默认范围；layer2 只在
-  `_ACTIVE_PROXY_ALL or paywall_case` 时把 proxy 传给 Playwright。
+- `_is_paywall_probe()`：`is_oa is not True and not free_at_publisher and paywall` —— Unpaywall 说
+  closed，或**拿不到判定**（没邮箱 / 接口失败 → `is_oa=None`）都算；只有确定 OA 才全程直连。
+  layer2 只在 `_ACTIVE_PROXY_ALL or paywall_case` 时把 proxy 传给 Playwright。
 - socks：requests 需要 PySocks（`requirements.txt` 已带）；没装时默认范围下 layer1 探测降级直连、
   `--proxy-all` 直接报用法错误。浏览器那层 Chromium 原生支持 socks5。
 - client 侧不要把密码写进日志：envelope 里的 `proxy` 走 `_proxy_display()` 脱敏成 `***@host`。

@@ -64,8 +64,8 @@ python lit_fetch.py <id> out.pdf --proxy socks5://127.0.0.1:1080
 python lit_fetch.py <id> out.pdf --proxy http://127.0.0.1:7890 --proxy-all
 ```
 
-- 默认**只让「付费刊那次探测」走代理**：Unpaywall 说 closed、PubMed 也没标 free 时，
-  出版商的直链和落地页（含浏览器）才带代理；OA 路线、元数据 API、预印本全直连。
+- 默认**只让「付费刊那次探测」走代理**：Unpaywall 说 closed、或**拿不到判定**（没填邮箱 /
+  接口失败）时，出版商的直链和落地页（含浏览器）才带代理；确定是 OA 的路线、元数据 API、预印本全直连。
 - `--proxy-all` / `LITFETCH_PROXY_ALL=1`：整条链路都走。
 - 不写 scheme 按 `http://` 算；端口必须写。`http://u:p@host:port` 支持账号密码。
 

@@ -323,11 +323,11 @@ def run() -> int:
     finally:
         lf._ACTIVE_PROXY, lf._ACTIVE_PROXY_ALL, lf._PROXY_FORCE = old_state
 
-    # 默认代理范围：只有「付费刊探测」那次才开着
+    # 默认代理范围：非 OA（closed 或判断不了）的出版商探测才开
     assert lf._is_paywall_probe(False, False, True) is True
     assert lf._is_paywall_probe(False, True, True) is False      # PubMed 标了 free
     assert lf._is_paywall_probe(True, False, True) is False      # 本来就是 OA
-    assert lf._is_paywall_probe(None, False, True) is False      # 不知道是否 OA → 不冒险
+    assert lf._is_paywall_probe(None, False, True) is True       # 判断不了 → 按付费刊探测处理
     assert lf._is_paywall_probe(False, False, False) is False    # paywall 关了
 
     assert lf._proxy_display("http://u:p@127.0.0.1:7890") == "http://***@127.0.0.1:7890"
@@ -345,7 +345,7 @@ def run() -> int:
 
     print("selfcheck OK：标识符 11 例 / 坏输入 3 例 / MDPI 2 例 / EPMC 3 例 / 退出码 4 例 / "
           "标题归一 2 例 / 直链判定 10 例 / bioRxiv 特例 4 例 / 下载取件 3 例 / "
-          "出版商直链 5 例 / location 排序 6 例 / layer2 门槛 8 例 / Cell Press PII 6 例 / paywall 开关 11 例 / 两层开关 4 例 / 版本分层 3 例 / 代理 16 例")
+          "出版商直链 5 例 / location 排序 6 例 / layer2 门槛 8 例 / Cell Press PII 6 例 / paywall 开关 11 例 / 两层开关 4 例 / 版本分层 3 例 / 代理 20 例")
     return 0
 
 

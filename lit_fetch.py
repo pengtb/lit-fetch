@@ -583,11 +583,13 @@ def _l2_candidates(blocked: list[dict], landings: list[tuple[str, str, int]],
 
 
 def _is_paywall_probe(is_oa: bool | None, free_at_publisher: bool, paywall: bool) -> bool:
-    """这次 fetch 是不是在探付费刊（Unpaywall 说 closed，且 PubMed 也没标 free）。
+    """这次 fetch 要不要按「付费刊探测」给代理。
 
-    默认的代理范围就看它：是 → 出版商那几段探测走代理；否 → 全直连。
+    Unpaywall 说 closed、或者**拿不到判定**（没邮箱 / 接口失败 → is_oa=None）都算：这两种情况下
+    出版商那几段探测（直链 + 落地页 + 浏览器）都该走代理。确定是 OA（is_oa=True）才全程直连；
+    PubMed 标了 free 的也不走（出版商页本来就免费）。
     """
-    return bool(is_oa is False and not free_at_publisher and paywall)
+    return bool(is_oa is not True and not free_at_publisher and paywall)
 
 
 def _prefer_publisher(ident: dict, pdfish: list[tuple[str, str, int]],

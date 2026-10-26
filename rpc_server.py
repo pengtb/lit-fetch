@@ -94,6 +94,8 @@ def _handle(req: dict) -> dict | None:
                    layer1=bool(params.get("layer1", lf.LAYER1_DEFAULT)),
                    quiet=True,
                    paywall=bool(params.get("paywall", lf.TRY_PAYWALL_DEFAULT)),
+                   proxy=params.get("proxy", ""),
+                   proxy_all=params.get("proxy_all"),
                    on_progress=hook)
     env["exit_code"] = lf.exit_code(env)
     _note("done", identifier=ident, ok=env["ok"], route=env.get("route"), exit_code=env["exit_code"])

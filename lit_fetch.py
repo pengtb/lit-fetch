@@ -19,6 +19,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import hashlib
+import importlib.util
 import json
 import os
 import re
@@ -26,6 +27,7 @@ import sys
 import time
 from pathlib import Path
 from typing import Callable
+from urllib.parse import urlsplit
 
 import requests
 
@@ -66,6 +68,65 @@ def load_dotenv(path: Path | None = None) -> None:
 load_dotenv()
 CONTACT = os.environ.get("LITFETCH_EMAIL", "")
 
+# 代理：`.env` 的 LITFETCH_PROXY（或环境变量）给默认值，`--proxy` / RPC 的 `proxy` 参数按次覆盖。
+# 显式给了就两层都优先走它 —— layer1 用 requests 的 proxies=，layer2 用 Playwright 的 proxy=。
+# 不给 = 维持原行为（requests 自己看环境变量 / Windows 系统代理，浏览器看系统默认）。
+PROXY = os.environ.get("LITFETCH_PROXY", "").strip()
+_ACTIVE_PROXY = ""                  # 本次 fetch 生效的那个（fetch 开头设置；空 = 不用显式代理）
+_ACTIVE_PROXY_ALL = False           # 本次是否「整条链路都走」（默认只让付费刊那次探测走）
+_PROXY_FORCE = False                # fetch 内部临时开（付费刊探测那几段）
+
+
+def _proxy_url(raw: str = "") -> str:
+    """规范化代理地址：没写 scheme 的补 http://；只认 http/https/socks4/socks5。空 = 不用代理。
+
+    端口必须写：layer2 的 Chromium 不会替我们猜默认端口，早点拒绝比到浏览器那层才炸好。
+    """
+    p = (raw or "").strip()
+    if not p:
+        return ""
+    if "://" not in p:
+        p = "http://" + p
+    scheme = p.split("://", 1)[0].lower()
+    if scheme not in ("http", "https", "socks4", "socks5"):
+        raise ValueError(f"代理协议只认 http/https/socks4/socks5，收到 {scheme!r}")
+    try:
+        u = urlsplit(p)
+        ok = bool(u.hostname and u.port)
+    except ValueError:
+        ok = False
+    if not ok:
+        raise ValueError(f"代理地址要写成 scheme://host:port：{raw!r}")
+    return p
+
+
+def _proxies() -> dict[str, str]:
+    """requests 的 proxies。空 dict = 保持默认（环境变量 / Windows 系统代理）。
+
+    默认只有「付费刊探测」那几段走代理（`_PROXY_FORCE`）；`--proxy-all` / `LITFETCH_PROXY_ALL=1`
+    才是整条链路都走（`_ACTIVE_PROXY_ALL`）。
+    """
+    p = _proxy_url(_ACTIVE_PROXY)
+    if not p or not (_ACTIVE_PROXY_ALL or _PROXY_FORCE):
+        return {}
+    return {"http": p, "https": p}
+
+
+def _proxy_display(raw: str = "") -> str:
+    """进 envelope / 日志的写法：把 user:pass 脱敏，别把密码写进插件通知。"""
+    p = _proxy_url(raw or _ACTIVE_PROXY)
+    if not p:
+        return ""
+    scheme, rest = p.split("://", 1)
+    if "@" in rest:
+        rest = "***@" + rest.rsplit("@", 1)[1]
+    return f"{scheme}://{rest}"
+
+
+def _socks_needs_pysocks(p: str) -> bool:
+    """requests 走 socks 要有 PySocks；没装就早点说清楚，别让它静默空手。"""
+    return p.startswith(("socks4://", "socks5://")) and importlib.util.find_spec("socks") is None
+
 
 def _env_flag(name: str, default: bool = True) -> bool:
     """`LITFETCH_XXX=0/false/no/off` → False；空或没设 → default。"""
@@ -86,6 +147,10 @@ TRY_PAYWALL_DEFAULT = _env_flag("LITFETCH_PAYWALL", True)
 # layer2 关掉 = 不开浏览器（等价于原来的 `--no-browser` / `allow_browser=False`）。
 LAYER1_DEFAULT = _env_flag("LITFETCH_LAYER1", True)
 LAYER2_DEFAULT = _env_flag("LITFETCH_LAYER2", True)
+
+# 代理范围：默认只让「付费刊那次探测」走代理（机构 IP 只在这条路上有用），OA 的下载仍旧直连。
+# `--proxy-all` / `LITFETCH_PROXY_ALL=1` 改成整条链路都走（元数据 API、OA 直链、浏览器全走）。
+PROXY_ALL = _env_flag("LITFETCH_PROXY_ALL", False)
 
 
 def hdrs(email: str = "") -> dict:
@@ -198,7 +263,8 @@ def grab(url: str, referer: str = "", email: str = "") -> bytes | None:
     t0 = time.time()
     for attempt in (1, 2):
         try:
-            r = requests.get(url, headers=h, timeout=TIMEOUT, allow_redirects=True)
+            r = requests.get(url, headers=h, timeout=TIMEOUT, allow_redirects=True,
+                             proxies=_proxies())
         except requests.RequestException as e:
             if attempt == 2:
                 say(f"  ✗ {url[:90]} → {type(e).__name__} ({time.time()-t0:.1f}s)")
@@ -225,7 +291,7 @@ def grab(url: str, referer: str = "", email: str = "") -> bytes | None:
 
 def _get_json(url: str, email: str = "") -> dict | None:
     try:
-        r = requests.get(url, headers=hdrs(email), timeout=TIMEOUT)
+        r = requests.get(url, headers=hdrs(email), timeout=TIMEOUT, proxies=_proxies())
         if r.status_code == 200:
             return r.json()
         say(f"  · {url[:80]} → HTTP {r.status_code}")
@@ -390,7 +456,8 @@ def s2_candidates(doi: str, email: str) -> list[tuple[str, str]]:
 def resolve_landing(url: str, email: str = "", timeout: int = TIMEOUT) -> str:
     """跟掉 doi.org 的 302，只拿最终 URL，不读 body（解析器慢，但别为它下两份 HTML）。"""
     try:
-        r = requests.get(url, headers=hdrs(email), timeout=timeout, stream=True)
+        r = requests.get(url, headers=hdrs(email), timeout=timeout, stream=True,
+                         proxies=_proxies())
         final = r.url
         r.close()
         return final or url
@@ -405,7 +472,7 @@ def landing_meta_candidates(url: str, email: str = "", timeout: int = 12) -> lis
     单独抓它只会白等 10–27s，所以调用方会跳过它。
     """
     try:
-        r = requests.get(url, headers=hdrs(email), timeout=timeout)
+        r = requests.get(url, headers=hdrs(email), timeout=timeout, proxies=_proxies())
     except Exception:
         return []
     if r.status_code != 200 or "html" not in (r.headers.get("Content-Type") or "").lower():
@@ -515,6 +582,14 @@ def _l2_candidates(blocked: list[dict], landings: list[tuple[str, str, int]],
     return [{"kind": "landing", "url": u} for u, _, _ in landings]
 
 
+def _is_paywall_probe(is_oa: bool | None, free_at_publisher: bool, paywall: bool) -> bool:
+    """这次 fetch 是不是在探付费刊（Unpaywall 说 closed，且 PubMed 也没标 free）。
+
+    默认的代理范围就看它：是 → 出版商那几段探测走代理；否 → 全直连。
+    """
+    return bool(is_oa is False and not free_at_publisher and paywall)
+
+
 def _prefer_publisher(ident: dict, pdfish: list[tuple[str, str, int]],
                       landings: list[tuple[str, str, int]], allow_browser: bool) -> bool:
     """要不要走「出版商那版优先」（把预印本/仓库的候选推后）。
@@ -546,6 +621,7 @@ def _defer_low_versions(cands: list[tuple[str, str, int]], prefer_pub: bool
 def fetch(raw_id: str, out: Path | None = None, title: str = "", email: str = "",
           engine: str = "edge", allow_browser: bool = LAYER2_DEFAULT, quiet: bool = False,
           layer1: bool = LAYER1_DEFAULT, paywall: bool = TRY_PAYWALL_DEFAULT,
+          proxy: str = "", proxy_all: bool | None = None,
           on_progress: Callable[[str], None] | None = None) -> dict:
     started = time.time()
     tried: list[str] = []
@@ -559,8 +635,26 @@ def fetch(raw_id: str, out: Path | None = None, title: str = "", email: str = ""
         """
         say(" ".join(str(x) for x in a), quiet=quiet)
 
-    global PROGRESS_HOOK
+    global PROGRESS_HOOK, _ACTIVE_PROXY, _ACTIVE_PROXY_ALL, _PROXY_FORCE
+    try:
+        _ACTIVE_PROXY = _proxy_url(proxy or PROXY)      # 本次显式给的优先，其次 .env / 环境变量
+    except ValueError as e:
+        return {"schema": SCHEMA, "ok": False, "tried": [], "elapsed_s": 0, "error": str(e)}
+    # 范围：默认只让付费刊那次探测走；proxy_all=True（--proxy-all / LITFETCH_PROXY_ALL=1）才全走。
+    # 没配代理时这个开关没有意义，归一成 False，免得 envelope 里看着像「开了但没生效」。
+    _ACTIVE_PROXY_ALL = bool(_ACTIVE_PROXY) and bool(PROXY_ALL if proxy_all is None else proxy_all)
+    _PROXY_FORCE = False
+    # socks5 只有 requests（layer1）要 PySocks，而 layer1 平时是直连的 —— 所以只在「全走」时拦。
+    # 默认范围下让它降级：layer1 那次探测直连，浏览器那层照走 socks5（Chromium 原生支持）。
+    socks_no_pysocks = _socks_needs_pysocks(_ACTIVE_PROXY)
+    if socks_no_pysocks and _ACTIVE_PROXY_ALL:
+        return {"schema": SCHEMA, "ok": False, "tried": [], "elapsed_s": 0,
+                "error": "整条链路走 socks5 需要 requests[socks]（uv pip install \"requests[socks]\"）；"
+                         "默认的「只付费刊走代理」不用装（layer1 直连、浏览器走 socks5）"}
     PROGRESS_HOOK = on_progress          # grab()/_get_json() 那些单行诊断也一并送去插件
+    if _ACTIVE_PROXY:
+        scope = "整条链路" if _ACTIVE_PROXY_ALL else "只付费刊那次探测"
+        note(f"[proxy] {_proxy_display()} —— {scope}走代理")
 
     try:
         ident = classify(raw_id)
@@ -697,6 +791,11 @@ def fetch(raw_id: str, out: Path | None = None, title: str = "", email: str = ""
                 return True
         return False
 
+    # 默认范围：只有「付费刊探测」这几段用代理（此时候选全是出版商那边的）；OA/预印本全直连。
+    paywall_case = _is_paywall_probe(is_oa, free_at_publisher, paywall)
+    _PROXY_FORCE = paywall_case and not socks_no_pysocks
+    if paywall_case and socks_no_pysocks:
+        note("  · socks5 没装 PySocks → layer1 这次探测直连（浏览器那层仍走 socks5）")
     for url, route, _ in now_p:
         if _browser_first(url):
             note(f"  ⇢ {url[:90]} —— 预印本特例，直接交给 layer2 的浏览器下载")
@@ -721,10 +820,14 @@ def fetch(raw_id: str, out: Path | None = None, title: str = "", email: str = ""
             browser.LOG_HOOK = PROGRESS_HOOK      # layer2 的诊断也送去插件（它自己照样打 stderr）
             note(f"[layer2] 引擎={engine}，用真浏览器再试"
                  f"（{len(l2_cands)} 个{'被墙' if blocked else '落地页'}候选）")
-            l2 = browser.fetch_with_browser(l2_cands, out, title=title, engine=engine,
-                                            quiet=False)   # layer2 的诊断始终打到 stderr：--json 只约束 stdout
+            # layer2 的诊断始终打到 stderr：--json 只约束 stdout
+            l2 = browser.fetch_with_browser(
+                l2_cands, out, title=title, engine=engine, quiet=False,
+                proxy=_ACTIVE_PROXY if (_ACTIVE_PROXY_ALL or paywall_case) else "")
         except ImportError:
             note("[layer2] browser.py 不在（或缺少 patchright）→ 只报 layer1 结果")
+
+    _PROXY_FORCE = False        # 后面退的低版本/仓库副本都是免费内容 → 回直连
 
     # 出版商那一路（含浏览器）都空手了，才退到预印本/仓库那版
     if not body and not (l2 or {}).get("ok"):
@@ -755,6 +858,7 @@ def fetch(raw_id: str, out: Path | None = None, title: str = "", email: str = ""
            "sha256": hashlib.sha256(body).hexdigest() if body else None,
            "path": None, "free_at_publisher": free_at_publisher,
            "is_oa": is_oa, "oa_status": oa_status, "paywall": paywall,
+           "proxy": _proxy_display(), "proxy_all": _ACTIVE_PROXY_ALL,
            "layer1": layer1, "layer2": allow_browser,
            "elapsed_s": round(time.time() - started, 1)}
 
@@ -816,6 +920,10 @@ def main(argv: list[str]) -> int:
     ap.add_argument("out", nargs="?")
     ap.add_argument("--title", default="")
     ap.add_argument("--email", default=CONTACT)
+    ap.add_argument("--proxy", default="",
+                    help="代理（http://host:port 或 socks5://host:port）；不给就用 LITFETCH_PROXY")
+    ap.add_argument("--proxy-all", action="store_true",
+                    help="整条链路都走代理（默认只让付费刊那次探测走）")
     ap.add_argument("--engine", default="edge", choices=["edge", "chrome", "chromium"])
     ap.add_argument("--no-browser", "--no-layer2", dest="no_layer2", action="store_true",
                     help="只用 layer1（HTTP），不开浏览器（也可用 LITFETCH_LAYER2=0）")
@@ -827,7 +935,8 @@ def main(argv: list[str]) -> int:
     a = ap.parse_args(argv)
 
     env = fetch(a.identifier, Path(a.out) if a.out else None, title=a.title, email=a.email,
-                engine=a.engine, quiet=a.json,
+                engine=a.engine, quiet=a.json, proxy=a.proxy,
+                proxy_all=True if a.proxy_all else None,
                 allow_browser=False if a.no_layer2 else LAYER2_DEFAULT,
                 layer1=False if a.no_layer1 else LAYER1_DEFAULT,
                 paywall=False if a.no_paywall else TRY_PAYWALL_DEFAULT)

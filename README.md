@@ -11,7 +11,8 @@
 ## 装
 
     uv venv --python 3.11 .venv
-    uv pip install --python .venv/Scripts/python.exe requests pymupdf patchright
+    uv pip install --python .venv/Scripts/python.exe -r requirements.txt
+    # requirements.txt：requests[socks]（带 PySocks，socks5 代理两层都能走）+ pymupdf + patchright
     # layer2 用系统已装的 Edge（channel=msedge），不需要下载任何浏览器构建
 
 ## 用
@@ -23,8 +24,9 @@
     python lit_fetch.py rpc            # stdio JSON-RPC 2.0（给 Zotero 插件用）
     python lit_fetch.py --selfcheck    # 离线自检
 
-引擎：`--engine edge|chrome|chromium`（默认 edge）。代理：默认不挂，需要时那一次命令前
-`export https_proxy=... http_proxy=...`（requests 继承环境变量）。
+引擎：`--engine edge|chrome|chromium`（默认 edge）。代理：默认不挂，需要时用
+`--proxy http://host:port`（或 `.env` 的 `LITFETCH_PROXY`）—— 默认**只让「付费刊那次探测」走代理**，
+OA 的下载仍直连；要整条链路都走加 `--proxy-all`。不写 scheme 按 `http://` 算。见下面「代理」那节。
 
 ## 配置（.env）
 
@@ -34,6 +36,8 @@
     LITFETCH_EMAIL=you@example.com          # Unpaywall/Crossref 要求带真邮箱，不填就跳过那条路线
     LITFETCH_PROFILE=C:\Users\you\.litfetch_profile   # 浏览器 profile 目录（默认 ~/.litfetch_profile）
     LITFETCH_FIXTURES=out\fixtures.json     # realcheck.py 的标题夹具（可选）
+    LITFETCH_PROXY=http://127.0.0.1:7890    # 代理地址（默认只用于付费刊那次探测；见「代理」节）
+    LITFETCH_PROXY_ALL=1                    # 整条链路都走代理（默认 0 = 只付费刊那次走）
     LITFETCH_LAYER1=0                       # 不跑 HTTP 阶梯（默认 1=跑）；只把 doi.org 入口留给 layer2
     LITFETCH_LAYER2=0                       # 不开浏览器（默认 1=开）
     LITFETCH_PAYWALL=0                      # 关掉「付费刊也试一次出版商正文页」（默认 1=试）
@@ -42,13 +46,37 @@
 三个开关命令行分别是 `--no-layer1` / `--no-layer2`（`--no-browser` 是它的别名）/ `--no-paywall`，
 RPC 分别是 `layer1` / `layer2` / `paywall` 三个参数。`paywall` 只管付费刊那一次尝试，与开放获取的路线无关。
 
+## 代理（可选）
+
+`--proxy` / `LITFETCH_PROXY` 给了之后，**默认只有「付费刊那次探测」走代理**：Unpaywall 说 closed、
+PubMed 也没标 free 时，出版商直链（含 Cell Press 的 `showPdf`）和出版商落地页那几段才会带上
+`proxies=` / Playwright 的 `proxy=`（等于 Chromium 的 `--proxy-server`，导航、子请求、下载、
+`route.fetch()` 全走）。OA 路线（元数据 API、arXiv/Unpaywall/MDPI 的直链、OA 落地页）和预印本
+全都是直连 —— 机构 IP 只在付费刊那一次有用，别让别的流量跟着绕。
+
+要**整条链路都走**就加 `--proxy-all`（或 `LITFETCH_PROXY_ALL=1`、RPC 的 `proxy_all: true`）。
+不填代理就维持原行为（requests 看环境变量/系统代理，浏览器看系统默认），零回归。
+
+写法：`http://host:port`、`https://host:port`、`socks5://host:port`（没写 scheme 按 `http://` 算）。
+带账号密码就写进 URL（`http://u:p@host:port`）；envelope 里的 `proxy` 会脱敏成 `http://***@host:port`，
+`proxy_all` 是本次是否全走。
+
+三个坑：
+
+- **socks5 要 PySocks**：`requirements.txt` 里的 `requests[socks]` 已经把 PySocks 带上（本机 venv 已装）；
+  换环境重建 venv 时记得装 —— 没装的话 layer1 只能降级直连，`--proxy-all` 会直接报用法错误（exit 1）。
+  浏览器那层（Chromium）原生支持 socks5，不依赖 PySocks。
+- **`cf_clearance` 绑 IP**：换代理出口 = 换 IP，profile 里已有的通行证会失效，第一次要重新过挑战
+  （见「Cloudflare 挑战」那节）。
+- **付费刊看代理落地的 IP**：机构订阅认出口 IP；代理不是校园出口，`paywall` 那一次照样失败。
+
 ## 契约
 
 JSON envelope（`--json` 时 stdout 只有这一行，诊断全在 stderr）：
 
     schema · input · kind · value · ok · route · url · tried[] · blocked_by[{kind,url}] ·
     verdict(match|title_absent|no_text|unreadable) · verify_detail · bytes · sha256 · path ·
-    free_at_publisher · is_oa · oa_status · paywall · paywalled · layer1 · layer2 · elapsed_s
+    free_at_publisher · is_oa · oa_status · paywall · paywalled · proxy · proxy_all · layer1 · layer2 · elapsed_s
 
 退出码：`0` 拿到 PDF · `1` 用法错 · `2` 所有路线空手 · `7` 被 bot 墙挡住（不是论文的问题）。
 
@@ -64,7 +92,8 @@ RPC（一行一个 JSON，stdout 只出协议帧）：
 方法：`ping` · `fetch` · `shutdown`。
 
 `fetch` 的可选参数：`identifier` · `out` · `title` · `email` · `engine` ·
-`layer1`（默认 true）· `layer2`（默认 true；老插件发的名字是 `allow_browser`）· `paywall`（默认 true）。
+`layer1`（默认 true）· `layer2`（默认 true；老插件发的名字是 `allow_browser`）· `paywall`（默认 true）·
+`proxy`（默认空 = 系统默认；写法同 `--proxy`）· `proxy_all`（默认 false = 只付费刊那次走）。
 三个开关的语义见「付费刊」那节和下面的配置表 —— 插件设置面板就接这三个（外加 engine/email）。
 
 ## 今天实测（2026-10-10，校园网直连，无代理）
@@ -162,7 +191,8 @@ RPC 冒烟：ping/fetch/未知方法/shutdown 四帧全对，stdout 纯协议帧
 * `paywall=false`（`--no-paywall` / `LITFETCH_PAYWALL=0`）：付费刊那一次尝试都不做（见上节）。
   实测关掉后 closed 直接 exit 2、`tried` 里没有 `cell_press_pdf`、也不开窗。
 
-三个开关都进 envelope（`layer1` / `layer2` / `paywall` + `paywalled`），插件可以据此显示当前状态。
+三个开关都进 envelope（`layer1` / `layer2` / `paywall` + `paywalled`），插件可以据此显示当前状态；
+当前生效的代理（脱敏后）在 `proxy` 里、范围在 `proxy_all` 里；没配代理时 `proxy` 是空串。
 
 ## Cloudflare 挑战：第一次遇到某个站点时（实测流程）
 
@@ -216,6 +246,7 @@ exit 0、`route=browser:edge`、**36,880,144B**（与 2025 年那次成功的大
     rpc_server.py   stdio JSON-RPC 2.0（插件用；按 mtime 热重载 lit_fetch/browser）
     selfcheck.py    离线断言 16 组（跑 `--selfcheck` 看清单：标识符、路线阶梯、layer2 门槛、开关…）
     realcheck.py    联网跑那 6 个已知用例
+    requirements.txt  依赖（requests[socks] / pymupdf / patchright）
     PLAN.zh.md      设计计划与调研结论
 
 配套插件：<https://github.com/pengtb/zotero-litfetch>（菜单 + 设置面板 + RPC 子进程 + 附件挂回条目）。

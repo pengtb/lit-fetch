@@ -293,9 +293,59 @@ def run() -> int:
     finally:
         probe.unlink()
 
+    # 代理：写法规范化 / 脱敏 / requests 与浏览器两边的参数形状
+    assert lf._proxy_url("") == ""
+    assert lf._proxy_url("127.0.0.1:7890") == "http://127.0.0.1:7890"
+    assert lf._proxy_url("socks5://127.0.0.1:1080") == "socks5://127.0.0.1:1080"
+    try:
+        lf._proxy_url("ftp://x:1")
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("ftp 代理应当被拒")
+    try:
+        lf._proxy_url("http://127.0.0.1")                 # 没端口 → 入口就拒，别等到浏览器那层
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("缺端口的代理应当被拒")
+    old_state = (lf._ACTIVE_PROXY, lf._ACTIVE_PROXY_ALL, lf._PROXY_FORCE)
+    try:
+        lf._ACTIVE_PROXY, lf._ACTIVE_PROXY_ALL, lf._PROXY_FORCE = "http://127.0.0.1:7890", False, False
+        assert lf._proxies() == {}, "默认（只付费刊）在普通段不能走代理"
+        lf._PROXY_FORCE = True
+        assert lf._proxies() == {"http": "http://127.0.0.1:7890", "https": "http://127.0.0.1:7890"}
+        lf._PROXY_FORCE = False
+        lf._ACTIVE_PROXY_ALL = True
+        assert lf._proxies() == {"http": "http://127.0.0.1:7890", "https": "http://127.0.0.1:7890"}
+        lf._ACTIVE_PROXY = ""
+        assert lf._proxies() == {}, "没配代理时必须返回空 dict（保持 requests 默认）"
+    finally:
+        lf._ACTIVE_PROXY, lf._ACTIVE_PROXY_ALL, lf._PROXY_FORCE = old_state
+
+    # 默认代理范围：只有「付费刊探测」那次才开着
+    assert lf._is_paywall_probe(False, False, True) is True
+    assert lf._is_paywall_probe(False, True, True) is False      # PubMed 标了 free
+    assert lf._is_paywall_probe(True, False, True) is False      # 本来就是 OA
+    assert lf._is_paywall_probe(None, False, True) is False      # 不知道是否 OA → 不冒险
+    assert lf._is_paywall_probe(False, False, False) is False    # paywall 关了
+
+    assert lf._proxy_display("http://u:p@127.0.0.1:7890") == "http://***@127.0.0.1:7890"
+    assert lf._socks_needs_pysocks("http://127.0.0.1:7890") is False
+    assert browser._proxy_settings("") is None
+    assert browser._proxy_settings("127.0.0.1:7890") == {"server": "http://127.0.0.1:7890"}
+    assert browser._proxy_settings("socks5://u:p@127.0.0.1:1080") == {
+        "server": "socks5://127.0.0.1:1080", "username": "u", "password": "p"}
+    try:
+        browser._proxy_settings("http://127.0.0.1")      # 没端口 → Chromium 不会替我们猜
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("缺端口的代理应当被拒")
+
     print("selfcheck OK：标识符 11 例 / 坏输入 3 例 / MDPI 2 例 / EPMC 3 例 / 退出码 4 例 / "
           "标题归一 2 例 / 直链判定 10 例 / bioRxiv 特例 4 例 / 下载取件 3 例 / "
-          "出版商直链 5 例 / location 排序 6 例 / layer2 门槛 8 例 / Cell Press PII 6 例 / paywall 开关 11 例 / 两层开关 4 例 / 版本分层 3 例")
+          "出版商直链 5 例 / location 排序 6 例 / layer2 门槛 8 例 / Cell Press PII 6 例 / paywall 开关 11 例 / 两层开关 4 例 / 版本分层 3 例 / 代理 16 例")
     return 0
 
 

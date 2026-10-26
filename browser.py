@@ -21,7 +21,7 @@ import sys
 import tempfile
 import time
 from pathlib import Path
-from urllib.parse import urljoin
+from urllib.parse import unquote, urljoin, urlsplit
 
 # ponytail: 允许用 LITFETCH_PROFILE 换个 profile 目录 —— 上一次跑剩的 Edge 还占着老目录时
 # （Windows 上 rename/删除都会 Permission denied），换一个干净的比去 kill 进程省事。
@@ -35,6 +35,25 @@ _CHALLENGE = ("just a moment", "請稍候", "请稍候", "cf_chl_opt", "cf-chl",
 _INTERACTIVE = ("challenges.cloudflare.com", "cf-turnstile", "data-sitekey", "verify you are human",
                 "請驗證", "请验证", "確認您是真人")
 _DOWNLOAD_FIRST_HOSTS = ("biorxiv.org", "medrxiv.org")   # 只有「浏览器下载」那条成过
+
+
+def _proxy_settings(raw: str) -> dict | None:
+    """lit_fetch 传进来的代理 → Playwright 的 proxy 参数。None = 不传（浏览器按系统默认）。
+
+    Playwright 的 server 要带 scheme 和端口（Chromium 不替我们猜默认端口）；用户名密码单独给。
+    """
+    if not raw:
+        return None
+    p = raw if "://" in raw else "http://" + raw
+    u = urlsplit(p)
+    if not u.hostname or not u.port:
+        raise ValueError(f"代理地址要写成 scheme://host:port：{raw!r}")
+    settings: dict = {"server": f"{u.scheme}://{u.hostname}:{u.port}"}
+    if u.username:
+        settings["username"] = unquote(u.username)
+    if u.password:
+        settings["password"] = unquote(u.password)
+    return settings
 
 
 def _download_first(url: str) -> bool:
@@ -470,7 +489,7 @@ def _landing_grab(page, url: str, quiet: bool) -> tuple[bytes | None, str | None
 
 
 def fetch_with_browser(blocked: list[dict], out: Path | None, title: str = "",
-                       engine: str = "edge", quiet: bool = False) -> dict:
+                       engine: str = "edge", quiet: bool = False, proxy: str = "") -> dict:
     """blocked: lit_fetch 传进来的 [{'kind','url'}]。返回 ok/url/bytes/sha256/path/verdict/..."""
     try:
         from patchright.sync_api import sync_playwright
@@ -483,6 +502,10 @@ def fetch_with_browser(blocked: list[dict], out: Path | None, title: str = "",
         return {"ok": False, "error": "没有被墙候选可试"}
 
     kwargs = {} if engine == "chromium" else {"channel": "msedge" if engine == "edge" else "chrome"}
+    proxy_settings = _proxy_settings(proxy)
+    if proxy_settings:
+        kwargs["proxy"] = proxy_settings    # --proxy-server：连导航、子请求、下载一起走
+        _log(f"  浏览器代理={proxy_settings['server']}", quiet)
     result: dict = {"ok": False}
     rejected: dict | None = None            # 拿到了但标题不对 → 别让它被后面的「被墙」盖掉
     with sync_playwright() as pw:

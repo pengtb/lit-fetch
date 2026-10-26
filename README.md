@@ -1,252 +1,123 @@
 # lit-fetch
 
-两层文献 PDF 抓取器：**layer1 纯 HTTP** 走开放获取路线，**layer2 真浏览器** 只兜底「有源但被 bot 墙挡住」
-的情况。**不绕付费墙**：不做机构代理、不含 Sci-Hub。机构 IP（校网/VPN）在的时候，付费刊也试一次出版商
-自己的正文页 —— 拿得到算拿到，拿不到照旧报「付费墙」（见下面那节）。参考实现是 `paper-fetch`（MIT），
-抄了它的路线思路与校验方法，砍掉了 TDM/机构/ClinicalKey 那一整套。
+给 **DOI / arXiv / PMID** 拿全文 PDF 的命令行工具，也是 Zotero 插件
+[zotero-litfetch](https://github.com/pengtb/zotero-litfetch) 的后端。
 
-配套的 Zotero 插件在 [`pengtb/zotero-litfetch`](https://github.com/pengtb/zotero-litfetch)：右键条目补 PDF，
-三个开关（`layer1` / `layer2` / `paywall`）和界面语言都在它的设置面板里。
+两层设计：先走纯 HTTP 的开放获取路线（便宜、快），拿不到再开真浏览器兜底（Cloudflare 挑战、
+跳转壳、只认导航的 PDF 端点）。**不绕付费墙**：不做机构代理、不含 Sci-Hub；只有在有机构 IP
+（校网/VPN）时，才对「Unpaywall 说 closed」的文献用出版商自己的正文页试一次。
 
-## 装
+## 功能
 
-    uv venv --python 3.11 .venv
-    uv pip install --python .venv/Scripts/python.exe -r requirements.txt
-    # requirements.txt：requests[socks]（带 PySocks，socks5 代理两层都能走）+ pymupdf + patchright
-    # layer2 用系统已装的 Edge（channel=msedge），不需要下载任何浏览器构建
+- **layer1（纯 HTTP）**：arXiv、Unpaywall 的全部 OA 位置、Semantic Scholar、Europe PMC、
+  PubMed free 标记、出版商直链、落地页 `citation_pdf_url`、MDPI CDN、bioRxiv/medRxiv 直链。
+- **layer2（真浏览器）**：用系统已装的 Edge（`channel=msedge`，不下载浏览器构建），处理
+  Cloudflare 挑战、跳转壳、带 token 的终址、只认导航的 PDF 端点、以及「让浏览器把 PDF 当下载交出来」。
+- **内容校验**：`%PDF` magic + 体积下限；给了 `--title` 再算标题命中率（前 6 页），文件名对不上就拒收。
+- **代理**：`http://` / `https://` / `socks5://`。默认只让「付费刊那次探测」走，`--proxy-all` 才整条链路走。
+- **稳定契约**：`--json` 输出一行 envelope，诊断全在 stderr；退出码 `0/1/2/7`；另有 stdio
+  JSON-RPC 供插件调用。
 
-## 用
+## 安装
 
-    python lit_fetch.py 2610.04475 out/a.pdf
-    python lit_fetch.py arXiv:2610.04475 out/a.pdf --title "文章标题" --email you@x.edu
-    python lit_fetch.py 10.1038/s41586-020-2649-2 out/b.pdf --json
-    python lit_fetch.py 10.1101/2025.05.31.656838 out/c.pdf --no-browser   # 只走 layer1
-    python lit_fetch.py rpc            # stdio JSON-RPC 2.0（给 Zotero 插件用）
-    python lit_fetch.py --selfcheck    # 离线自检
+需要 Python 3.11+。
 
-引擎：`--engine edge|chrome|chromium`（默认 edge）。代理：默认不挂，需要时用
-`--proxy http://host:port`（或 `.env` 的 `LITFETCH_PROXY`）—— 默认**只让「付费刊那次探测」走代理**，
-OA 的下载仍直连；要整条链路都走加 `--proxy-all`。不写 scheme 按 `http://` 算。见下面「代理」那节。
+```bash
+uv venv --python 3.11 .venv
+uv pip install --python .venv/Scripts/python.exe -r requirements.txt
+```
 
-## 配置（.env）
+- `requirements.txt`：`requests[socks]`（带 PySocks，socks5 两层可用）、`pymupdf`、`patchright`。
+- layer2 用系统已装的 Edge（或 Chrome / Chromium），不需要下载任何浏览器构建。
+- 想用代理/邮箱而不改命令行参数，就把项目根目录的 `.env.example` 抄成 `.env` 再改。
 
-本机配置放项目根目录的 `.env`（`.gitignore` 里有它，不会进仓库；照 `.env.example` 抄一份即可）。
-**环境变量优先于 `.env`**，想临时覆盖就 export，不用改文件。值只认字面量（不展开 `%USERPROFILE%`/`$HOME`）。
+## 用法
 
-    LITFETCH_EMAIL=you@example.com          # Unpaywall/Crossref 要求带真邮箱，不填就跳过那条路线
-    LITFETCH_PROFILE=C:\Users\you\.litfetch_profile   # 浏览器 profile 目录（默认 ~/.litfetch_profile）
-    LITFETCH_FIXTURES=out\fixtures.json     # realcheck.py 的标题夹具（可选）
-    LITFETCH_PROXY=http://127.0.0.1:7890    # 代理地址（默认只用于付费刊那次探测；见「代理」节）
-    LITFETCH_PROXY_ALL=1                    # 整条链路都走代理（默认 0 = 只付费刊那次走）
-    LITFETCH_LAYER1=0                       # 不跑 HTTP 阶梯（默认 1=跑）；只把 doi.org 入口留给 layer2
-    LITFETCH_LAYER2=0                       # 不开浏览器（默认 1=开）
-    LITFETCH_PAYWALL=0                      # 关掉「付费刊也试一次出版商正文页」（默认 1=试）
+```bash
+python lit_fetch.py 2610.04475 out/a.pdf                    # arXiv
+python lit_fetch.py 10.1038/s41586-020-2649-2 out/b.pdf     # DOI
+python lit_fetch.py 10.1101/2025.05.31.656838 out/c.pdf --no-browser   # 只走 layer1
+python lit_fetch.py arXiv:2610.04475 out/a.pdf --title "文章标题" --email you@x.edu
+python lit_fetch.py 10.1186/s12984-023-01168-x out/d.pdf --proxy http://127.0.0.1:7890
+python lit_fetch.py rpc            # stdio JSON-RPC 2.0（给 Zotero 插件用）
+python lit_fetch.py --selfcheck    # 离线自检
+```
 
-`LITFETCH_PROFILE` 里存着各站点的 `cf_clearance`，换目录等于把已过的 Cloudflare 挑战丢掉 —— 见下面那节。
-三个开关命令行分别是 `--no-layer1` / `--no-layer2`（`--no-browser` 是它的别名）/ `--no-paywall`，
-RPC 分别是 `layer1` / `layer2` / `paywall` 三个参数。`paywall` 只管付费刊那一次尝试，与开放获取的路线无关。
+支持：DOI、`arXiv:xxxx` / 裸 arXiv id、bioRxiv/medRxiv DOI、PubMed ID。
+引擎：`--engine edge|chrome|chromium`（默认 edge）。
 
-## 代理（可选）
+### 三个开关
 
-`--proxy` / `LITFETCH_PROXY` 给了之后，**默认只有「付费刊那次探测」走代理**：Unpaywall 说 closed、
-PubMed 也没标 free 时，出版商直链（含 Cell Press 的 `showPdf`）和出版商落地页那几段才会带上
-`proxies=` / Playwright 的 `proxy=`（等于 Chromium 的 `--proxy-server`，导航、子请求、下载、
-`route.fetch()` 全走）。OA 路线（元数据 API、arXiv/Unpaywall/MDPI 的直链、OA 落地页）和预印本
-全都是直连 —— 机构 IP 只在付费刊那一次有用，别让别的流量跟着绕。
+| 开关 | CLI | `.env` | RPC | 默认 | 作用 |
+|---|---|---|---|---|---|
+| layer1 | `--no-layer1` | `LITFETCH_LAYER1=0` | `layer1` | on | 关掉＝不跑任何 HTTP 阶梯，只把 `doi.org` 入口留给浏览器 |
+| layer2 | `--no-layer2`（别名 `--no-browser`） | `LITFETCH_LAYER2=0` | `layer2` | on | 关掉＝不开浏览器 |
+| paywall | `--no-paywall` | `LITFETCH_PAYWALL=0` | `paywall` | on | 关掉＝付费刊那一次出版商正文页也不试，只做开放获取 |
 
-要**整条链路都走**就加 `--proxy-all`（或 `LITFETCH_PROXY_ALL=1`、RPC 的 `proxy_all: true`）。
-不填代理就维持原行为（requests 看环境变量/系统代理，浏览器看系统默认），零回归。
+三个开关和当前代理都会写进 envelope（`layer1` / `layer2` / `paywall` / `proxy` / `proxy_all`）。
 
-写法：`http://host:port`、`https://host:port`、`socks5://host:port`（没写 scheme 按 `http://` 算）。
-带账号密码就写进 URL（`http://u:p@host:port`）；envelope 里的 `proxy` 会脱敏成 `http://***@host:port`，
-`proxy_all` 是本次是否全走。
+### 代理
 
-三个坑：
+```bash
+python lit_fetch.py <id> out.pdf --proxy http://127.0.0.1:7890
+python lit_fetch.py <id> out.pdf --proxy socks5://127.0.0.1:1080
+python lit_fetch.py <id> out.pdf --proxy http://127.0.0.1:7890 --proxy-all
+```
 
-- **socks5 要 PySocks**：`requirements.txt` 里的 `requests[socks]` 已经把 PySocks 带上（本机 venv 已装）；
-  换环境重建 venv 时记得装 —— 没装的话 layer1 只能降级直连，`--proxy-all` 会直接报用法错误（exit 1）。
-  浏览器那层（Chromium）原生支持 socks5，不依赖 PySocks。
-- **`cf_clearance` 绑 IP**：换代理出口 = 换 IP，profile 里已有的通行证会失效，第一次要重新过挑战
-  （见「Cloudflare 挑战」那节）。
-- **付费刊看代理落地的 IP**：机构订阅认出口 IP；代理不是校园出口，`paywall` 那一次照样失败。
+- 默认**只让「付费刊那次探测」走代理**：Unpaywall 说 closed、PubMed 也没标 free 时，
+  出版商的直链和落地页（含浏览器）才带代理；OA 路线、元数据 API、预印本全直连。
+- `--proxy-all` / `LITFETCH_PROXY_ALL=1`：整条链路都走。
+- 不写 scheme 按 `http://` 算；端口必须写。`http://u:p@host:port` 支持账号密码。
 
-## 契约
+## 配置（`.env`）
 
-JSON envelope（`--json` 时 stdout 只有这一行，诊断全在 stderr）：
+复制 `.env.example` 为 `.env`；环境变量优先于文件。值只认字面量（不展开 `%USERPROFILE%`）。
 
-    schema · input · kind · value · ok · route · url · tried[] · blocked_by[{kind,url}] ·
-    verdict(match|title_absent|no_text|unreadable) · verify_detail · bytes · sha256 · path ·
-    free_at_publisher · is_oa · oa_status · paywall · paywalled · proxy · proxy_all · layer1 · layer2 · elapsed_s
+| 变量 | 说明 |
+|---|---|
+| `LITFETCH_EMAIL` | Unpaywall/Crossref 要求的联系邮箱；不填会跳过 Unpaywall 那条路线 |
+| `LITFETCH_PROFILE` | 浏览器 profile 目录（默认 `~/.litfetch_profile`，存着各站点的 `cf_clearance`） |
+| `LITFETCH_FIXTURES` | `realcheck.py` 的标题夹具（可选） |
+| `LITFETCH_PROXY` | 代理地址，见上节 |
+| `LITFETCH_PROXY_ALL` | `1` = 整条链路都走代理（默认只付费刊探测走） |
+| `LITFETCH_LAYER1` / `LITFETCH_LAYER2` / `LITFETCH_PAYWALL` | 三个开关，`0` 关 |
+
+## 输出契约
+
+`--json` 时 stdout 只有一行 envelope（诊断全在 stderr）：
+
+```
+schema · input · kind · value · ok · route · url · tried[] · blocked_by[{kind,url}] ·
+verdict(match|title_absent|no_text|unreadable) · verify_detail · bytes · sha256 · path ·
+free_at_publisher · is_oa · oa_status · paywall · paywalled · proxy · proxy_all ·
+layer1 · layer2 · elapsed_s
+```
 
 退出码：`0` 拿到 PDF · `1` 用法错 · `2` 所有路线空手 · `7` 被 bot 墙挡住（不是论文的问题）。
 
-    # 只有 2 是关于论文的证据；7 意思是「等一会再试，或换条路」
-
 RPC（一行一个 JSON，stdout 只出协议帧）：
 
-    → {"jsonrpc":"2.0","id":1,"method":"fetch","params":{"identifier":"10.1038/x","out":"C:/a.pdf","title":"..."}}
-    ← {"jsonrpc":"2.0","method":"progress","params":{"stage":"layer1","identifier":"10.1038/x"}}
-    ← {"jsonrpc":"2.0","method":"progress","params":{"stage":"done","ok":true,"route":"unpaywall","exit_code":0}}
-    ← {"jsonrpc":"2.0","id":1,"result":{...envelope..., "exit_code":0}}
+```json
+→ {"jsonrpc":"2.0","id":1,"method":"fetch","params":{"identifier":"10.1038/x","out":"C:/a.pdf"}}
+← {"jsonrpc":"2.0","method":"progress","params":{"stage":"layer1","identifier":"10.1038/x"}}
+← {"jsonrpc":"2.0","id":1,"result":{...envelope..., "exit_code":0}}
+```
 
-方法：`ping` · `fetch` · `shutdown`。
+方法：`ping` · `fetch` · `shutdown`。`fetch` 可选参数：`identifier` · `out` · `title` · `email` ·
+`engine` · `layer1` · `layer2`（老名字 `allow_browser`）· `paywall` · `proxy` · `proxy_all`。
 
-`fetch` 的可选参数：`identifier` · `out` · `title` · `email` · `engine` ·
-`layer1`（默认 true）· `layer2`（默认 true；老插件发的名字是 `allow_browser`）· `paywall`（默认 true）·
-`proxy`（默认空 = 系统默认；写法同 `--proxy`）· `proxy_all`（默认 false = 只付费刊那次走）。
-三个开关的语义见「付费刊」那节和下面的配置表 —— 插件设置面板就接这三个（外加 engine/email）。
+## 致谢
 
-## 今天实测（2026-10-10，校园网直连，无代理）
+- [paper-fetch](https://github.com/drpwchen/paper-fetch)（MIT，© drpwchen）—— 路线阶梯的思路、
+  `%PDF`/标题校验方法、MDPI CDN、「导航 + 带 token 终址」这些取字节套路都参考了它。本项目只保留了
+  开放获取 + bot 墙兜底，砍掉了它的 TDM API / 机构代理 / ClinicalKey 那一整套。
+- [zotero-pdf2zh](https://github.com/guaguastandup/zotero-pdf2zh) —— 「Zotero 插件 + 本地 Python
+  后端」的形态参考；本项目的后端用 stdio JSON-RPC，没有常驻 HTTP 服务。
+- [Zotero](https://www.zotero.org/) —— 插件宿主与相关文档。
 
-| 输入 | 结果 |
-|---|---|
-| `2610.04475`（arXiv） | exit 0 · route=arxiv · 1.96MB · **0.9s** |
-| `10.1371/journal.pcbi.1011787`（PLOS） | exit 0 · route=landing_meta · 3.16MB · verdict=match |
-| `10.1186/s12984-023-01168-x`（BMC） | exit 0 · route=unpaywall · 880KB · match · 18s |
-| `10.3390/ijms25179306`（MDPI） | exit 0 · route=mdpi_cdn · 3.69MB · match · 19s |
-| `10.1038/s41586-020-2649-2`（Nature） | exit 0 · route=unpaywall · 1.22MB · match · 17s |
-| `10.1101/2024.01.30.24301983`（medRxiv） | exit 0 · route=unpaywall · 2.46MB · 14s |
-| `10.1101/2025.05.31.656838`（bioRxiv） | exit 7 · 两种 PDF 形态都 403（见下） |
+## 许可证
 
-RPC 冒烟：ping/fetch/未知方法/shutdown 四帧全对，stdout 纯协议帧，arXiv 那篇 1.96MB 落盘。
+[MIT](LICENSE)，© 2026 Peng Tianbo。
 
-## 2026-10-14 复核（校网 VPN；注意 VPN 是系统级的，自动化浏览器同样吃机构 IP）
-
-| 输入 | 结果 |
-|---|---|
-| `10.1016/j.cell.2026.09.017`（Cell，closed） | exit 0 · route=browser:edge · 11,110,651B · 36 页 · 标题 100%（走新加的 `cell_press_pdf`） |
-| `10.1093/bib/bbag439`（OUP，落地页那条） | exit 0 · route=browser:edge · 2,690,419B · 25 页 · 标题 100% |
-| `10.1093/bioinformatics/btag482`（OUP，`advance-article-pdf` 那条） | 时通时不通：成的几次 exit 0 / 4.93MB；不通的那次卡在 `advance-article-pdf` 路径上的真 CF 挑战（60s 没过，需要点一下或重试） |
-| `10.1038/s41586-020-2649-2`、`10.1186/s12959-025-03781-6` 等 OA 刊 | 无回归，`route=unpaywall` / `springer_pdf` 照旧 |
-
-## layer2 取字节的三条路（按顺序试）
-
-0. **bioRxiv / medRxiv 特例：只有「浏览器直接下载」这一条**。这两个站点对任何**二次**请求
-   （裸 HTTP、经代理、`route.fetch()`、带 `Sec-Fetch-*` 导航头重取）都 403，导航本身拿到的也只是
-   Chromium 阅读器的占位文档（348B）；唯一成过的一次（36,880,144B）是让浏览器把 PDF 当下载交出来
-   ——下载不产生第二次请求。名单外还有：Europe PMC 里这条预印本 `hasPDF=N`，它给的唯一 PDF 链接
-   就是同一个 bioRxiv early URL（没有替代源）。
-   `lit_fetch.py` 那边只有 `biorxiv.org` 会被标成 browser_first（medRxiv 在 layer1 有能成的路，
-   不抢它的机会）；只要 layer2 拿到 medRxiv 的 URL，走的也是下载这条。
-   另外：**预印本（biorxiv/medrxiv）的 DOI 根本不走 unpaywall/S2/Europe PMC 那条 OA 阶梯** ——
-   biorxiv 反正只有这条路成，问它们只会换来同一堵 CF 墙、还多撞几次；medrxiv 自己的两条直链在
-   layer1 就能 200，也用不着。所以预印本从候选到取字节就是「自己的直链 → 浏览器」，一步不多。
-
-1. **`route.fetch()`**（首选）：用 Playwright 的路由在渲染器拿到 PDF 前把响应体截下来；拿到 `%PDF`
-   就 `fulfill(204)` 收尾。不改 Edge 偏好、不二次请求、不碰内置阅读器，页面也不会死。
-   实测：控制用的 dummy.pdf → 13,264B `%PDF-`，页面存活（`selfcheck_layer2.py` 就是这一条的验收）。
-   两个坑（`10.1093/bioinformatics/btag482` 那次实测逼出来的）：
-   * **不是 PDF 时要把真实响应还回页面**（`route.fulfill(response=resp)`），不能一律 204 ——
-     204 把导航吞成空白页，CF 的挑战页永远没机会渲染、挑战也就不会自解，用户看到的就是白屏 +
-     静默等满 420s 后失败。改成还真实响应后，挑战页正常渲染并在 60s 内自己过，下载随之落地
-     （该 DOI 4,934,279B / 12 页，标题命中 100%）。
-   * 收尾的 `page.unroute(pred, handler)` 必须传**同一个谓词对象和同一个 handler**：随手写个新
-     `lambda` Playwright 匹配不上，这条路由会一直留着，之后同一个 URL 的每次导航（② 和 ③）都被它
-     吞掉。selfcheck 里有这条恒等断言（把修复藏起来它就红）。
-2. **浏览器直接下载**：profile 里写 `plugins.always_open_pdf_externally=true`，让 Edge 把 PDF 当下载交出来。
-   这条正是 bioRxiv 那次成功拿到的 **36,880,144B**（29 页，标题 "The mGluR5 Agonist, CHPG, …"）——
-   代价是它有时会让整个 Edge 上下文直接退出（控制 PDF 也能复现），所以现在只当备用。
-3. **真导航 + 带 token 终址**：导航后响应头是 `application/pdf` 时，取 302 后的终址再用浏览器上下文
-   取一次（OUP/silverchair 那条：1.71MB）。会撞 429 的站点（bioRxiv）在这条上必然失败。
-
-**落地页候选不走上面这三条**，走 `_landing_grab()`：导航 → 等它跳完（meta refresh / JS）→ 读
-`citation_pdf_url` → 页面内 fetch。两个坑（都为 OUP/silverchair 实测所得）：
-
-* 页内 fetch 被拒（`TypeError: Failed to fetch`）**不等于拿不到**：出版商的 PDF 端点常常只认「导航」
-  （子请求 403 / 被拒，导航过去照样下）。所以页内 fetch 失败会退到 ②「让浏览器当下载交出来」。
-  实测 `10.1093/bib/bbag439`：落地页给出 `academic.oup.com/bib/article-pdf/…`，页内 fetch 失败 →
-  导航式下载 → **2,690,419B `%PDF-1.7` / 25 页 / 标题 100%**，exit 0（改前 exit 7）。
-* 一开始把落地页当「可能直返 PDF 的候选」喂给 ① 是错的：① 会 `fulfill(204)` 把这次导航吞掉，页面停在
-  about:blank（用户看到白屏），跳转壳永远跳不动；② 再干等 420s，候选预算（60s）早爆，真正有用的
-  「读 citation_pdf_url」一次都轮不到。
-
-## 付费刊（Unpaywall 说 closed）怎么走（2026-10-14 实测）
-
-政策没变：**不绕付费墙**（不做机构代理、不含 Sci-Hub）。变的是「closed 也值得试一次出版商的正文页」——
-机构 IP（校网/VPN）在的时候那一次就是唯一的路，不在的时候它几十秒内以「付费墙」收尾。
-**这个开关是 `LITFETCH_PAYWALL`（默认 `1`）/ `--no-paywall` / RPC 的 `paywall` 参数**，关掉就回到老行为。
-
-* layer2 门槛（`_l2_candidates`）：确认非 OA 且 PubMed 不 free 时，**只**为出版商页（rank 0，或 doi.org
-  那条 `doi_resolver`）开一次窗；落地页里只有仓库/预印本页面时仍然不开。
-* Cell Press（`10.1016/`）：`https://www.cell.com/action/showPdf?pii=<PII>` 是免 token 的正文入口。
-  PII 不在 DOI 里，用 Crossref 的 `alternative-id`（`S0092867426011190` → `S0092-8674(26)01119-0`）。
-  **必须判成直链**（`_looks_like_pdf` 认 `showpdf`）：它一导航就开始下载，被当落地页喂给
-  `_landing_grab` 只会得到一个 `goto` 异常。
-  * 反例（为什么不用落地页那条）：同一条 DOI 的落地页是 doi.org → linkinghub → **sciencedirect**，
-    那一页既没有 `citation_pdf_url`，`pdfft?md5=…` 导航过去也不落盘（50s 无文件）。
-  * 实测 `10.1016/j.cell.2026.09.017`：HTTP 层 403（cf_challenge，0.3s）→ layer2 `route.fetch` 403 →
-    ②下载 → **11,110,651B `%PDF-1.7` / 36 页 / 标题命中 100%**，`exit 0`，全程不用人点
-    （cell.com 的 CF 挑战在自动化窗口里 ~5s 自己过）。
-
-配套的加固：每个候选一个新页面；上下文整个挂了就重启一次浏览器再继续；浏览器侧也吃到
-`403/429` 就跳过该候选（否则单候选三种方法串起来要两分钟）。
-
-## 三个开关（插件设置面板对应它们，2026-10-14 实测）
-
-* `layer1=false`（`--no-layer1` / `LITFETCH_LAYER1=0`）：不跑 HTTP 阶梯 —— 一个元数据 API 都不问，
-  只把 `https://doi.org/<doi>` 那条入口交给 layer2。实测 `arXiv:2610.04475` + `--no-layer1` 是
-  **0.0s 空手**（arXiv 没有 doi.org 入口可兜，`tried=[]`）；DOI 则由浏览器从落地页自己找。
-* `layer2=false`（`--no-layer2`，别名 `--no-browser`）：不开浏览器。实测 Cell 那条停在 layer1 的
-  HTTP 403（`blocked_by=[cf_challenge]`，exit 7）。
-* `paywall=false`（`--no-paywall` / `LITFETCH_PAYWALL=0`）：付费刊那一次尝试都不做（见上节）。
-  实测关掉后 closed 直接 exit 2、`tried` 里没有 `cell_press_pdf`、也不开窗。
-
-三个开关都进 envelope（`layer1` / `layer2` / `paywall` + `paywalled`），插件可以据此显示当前状态；
-当前生效的代理（脱敏后）在 `proxy` 里、范围在 `proxy_all` 里；没配代理时 `proxy` 是空串。
-
-## Cloudflare 挑战：第一次遇到某个站点时（实测流程）
-
-症状：自动化那个窗口弹出「人类验证」，等满 60s 也过不去；同一个站在你日常浏览器里一切正常。
-
-原因（2026-10-12 实测，不是猜的）：**不是指纹问题**。用本项目的启动参数开 Edge 跑 bot.sannysoft.com，
-`navigator.webdriver=false`、UA 是真 Edge（`Edg/155`）、plugins/chrome/WebGL 全过 —— 干净。真正缺的是
-这份 profile 里**没有该站的 `cf_clearance`**。这个 cookie 绑 IP + User-Agent，一旦拿到能在 profile 里留很久
-（实测 bioRxiv 那条有效期到 2027-10-12；本机日常 Edge profile 里的 wiley/linux.do 等也都是 2027 年到期）。
-
-解法：用**同一份** profile、**不带任何自动化参数**手动开一次，把挑战过掉就行：
-
-    "%ProgramFiles(x86)%\Microsoft\Edge\Application\msedge.exe" --user-data-dir="%USERPROFILE%\.litfetch_profile" <文章 URL>
-
-过完关掉窗口，之后 `lit_fetch.py` 跑同一站就不会再挑战了。
-
-三个坑：
-
-- 那一次必须**不带** `--remote-debugging-pipe` / `--disable-blink-features=AutomationControlled` 之类自动化参数，
-  否则 CF 照旧给挑战（patchright 自己加的那套参数也算）。
-- 手动那次和自动化必须同一个 `--engine`（都是 msedge）：`cf_clearance` 绑 UA，换成 chrome 立刻失效。
-- **别在 profile 被占用时跑自动化**：Chromium 不接受同一个 `user-data-dir` 起第二个实例。
-  `browser.py` 现在启动前会查占用（`_profile_holder()`），查到就直接报
-  `blocked_kind=profile_busy` + `needs_human`，而不是把 profile 挪开偷偷换一个干净目录
-  （那样等于把 clearance 扔掉、又变回挑战）。跑完也会显式关掉浏览器，不留残骸；
-  只有「需要真人点挑战」那次例外，窗口会留着让你点。
-
-实测结果：喂完 clearance 后跑 `10.1101/2025.05.31.656838`（bioRxiv，README 里原来唯一过不去的那篇）→
-exit 0、`route=browser:edge`、**36,880,144B**（与 2025 年那次成功的大小一致）、标题命中 100%、87.6s，
-走的就是「浏览器直接下载」那条。
-
-## 已知的坑（都是实测踩出来的）
-
-- **bioRxiv/medRxiv 现在会对本机 403/429**，而且是四种方法一起挡（裸 HTTP、经代理、浏览器下载、
-  `route.fetch`）。这是限速/名声，不是方法问题 —— 15:15 那次成功就是证据。别连点：同一站点连打三次，
-  本来能过的站点就变成过不去。（2026-10-12 复核：主因其实是「这份 profile 没有 cf_clearance」，
-  见上一节 —— 喂过之后同一篇 36.9MB 一次过。）
-- **bioRxiv 的两种 PDF 形态**：`/content/<doi>v1.full.pdf` 一律 403；能用的只有
-  `/content/<server>/early/<YYYY>/<MM>/<DD>/<id>.full.pdf`（medRxiv 实测 200 2.46MB %PDF-）。
-  early 形式靠 `api.biorxiv.org/details/<server>/<doi>` 给的那一版的日期拼出来，所以俩都要试。
-- **doi.org 很慢**（实测 10–27s），所以它只做「解析 302 拿落地页」，且排在所有直链之后、用短超时。
-  PLOS 全靠这条 meta 路救回来。
-- 落地页与直链要分开处理：把 `https://doi.org/...` 当 PDF 直接抓，白等 27s 拿回一坨 HTML（改前 147s、
-  改后 67s 的就是这里）。
-- `--title` 才做内容校验（前 6 页最长连续命中率 ≥0.85 判 match）；不给标题就只看 `%PDF` + 体积下限。
-
-## 文件
-
-    lit_fetch.py    标识符归一化 · 路线阶梯 · 校验 · CLI
-    browser.py      layer2：Edge + 挑战判定（自动/需真人）+ route.fetch/下载/落地页三条取字节路
-    rpc_server.py   stdio JSON-RPC 2.0（插件用；按 mtime 热重载 lit_fetch/browser）
-    selfcheck.py    离线断言 16 组（跑 `--selfcheck` 看清单：标识符、路线阶梯、layer2 门槛、开关…）
-    realcheck.py    联网跑那 6 个已知用例
-    requirements.txt  依赖（requests[socks] / pymupdf / patchright）
-    PLAN.zh.md      设计计划与调研结论
-
-配套插件：<https://github.com/pengtb/zotero-litfetch>（菜单 + 设置面板 + RPC 子进程 + 附件挂回条目）。
+配套插件：[zotero-litfetch](https://github.com/pengtb/zotero-litfetch)。
+工程细节（路线实现、实测样本、踩过的坑）在 [AGENTS.md](AGENTS.md)。
